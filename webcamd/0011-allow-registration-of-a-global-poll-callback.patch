@@ -1,0 +1,49 @@
+From e1140f14953f0b671758632dd9f4f22e42deb860 Mon Sep 17 00:00:00 2001
+From: Jan Hauffa <jhauffa@gmail.com>
+Date: Fri, 17 Jan 2014 14:19:54 +0100
+Subject: [PATCH 11/16] allow registration of a global poll callback
+
+---
+ api/webcamd.h | 2 ++
+ webcamd.c     | 9 +++++++++
+ 2 files changed, 11 insertions(+)
+
+diff --git a/api/webcamd.h b/api/webcamd.h
+index 857c41f..c536f3a 100644
+--- a/api/webcamd.h
++++ b/api/webcamd.h
+@@ -26,6 +26,8 @@ enum {
+ 
+ struct cdev_handle;
+ 
++void set_poll_callback(void (*callback)(void));
++
+ struct cdev_handle *linux_open(int f_v4b, int fflags);
+ int	linux_close(struct cdev_handle *);
+ int	linux_ioctl(struct cdev_handle *, int fflags, unsigned int cmd, void *arg);
+diff --git a/webcamd.c b/webcamd.c
+index 5da62a7..650f6d0 100644
+--- a/webcamd.c
++++ b/webcamd.c
+@@ -850,9 +850,18 @@ check_signal(void)
+ 	return (thread_got_stopping() == 0);
+ }
+ 
++static void (*poll_callback)(void);
++
++__attribute__((visibility("default"))) void
++set_poll_callback(void (*callback)(void))
++{
++	poll_callback = callback;
++}
++
+ void
+ poll_wakeup_internal(void)
+ {
++	(*poll_callback)();
+ }
+ 
+ extern pthread_key_t cdev_key;
+-- 
+2.15.2 (Apple Git-101.1)
+

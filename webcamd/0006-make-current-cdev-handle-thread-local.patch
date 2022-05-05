@@ -1,0 +1,63 @@
+From 895cbbfed0ebc775845e3fda08dac3dfed514993 Mon Sep 17 00:00:00 2001
+From: Jan Hauffa <jhauffa@gmail.com>
+Date: Mon, 13 Jan 2014 23:20:54 +0100
+Subject: [PATCH 06/16] make current cdev handle thread-local
+
+---
+ kernel/linux_thread.c | 6 ++++++
+ webcamd.c             | 6 +++---
+ 2 files changed, 9 insertions(+), 3 deletions(-)
+
+diff --git a/kernel/linux_thread.c b/kernel/linux_thread.c
+index 28b197c..8645d28 100644
+--- a/kernel/linux_thread.c
++++ b/kernel/linux_thread.c
+@@ -30,6 +30,9 @@ static pthread_cond_t sema_cond;
+ static pthread_mutex_t atomic_mutex;
+ static volatile uint32_t atomic_recurse;
+ static pthread_key_t wrapper_key;
++#ifdef __APPLE__
++pthread_key_t cdev_key;
++#endif
+ 
+ struct task_struct linux_task = {
+ 	.comm = "WEBCAMD",
+@@ -596,6 +599,9 @@ thread_init(void)
+ 	pthread_condattr_destroy(&cattr);
+ 
+ 	pthread_key_create(&wrapper_key, NULL);
++#ifdef __APPLE__
++	pthread_key_create(&cdev_key, NULL);
++#endif
+ 
+ 	return (0);
+ }
+diff --git a/webcamd.c b/webcamd.c
+index a1507e9..5da62a7 100644
+--- a/webcamd.c
++++ b/webcamd.c
+@@ -855,18 +855,18 @@ poll_wakeup_internal(void)
+ {
+ }
+ 
+-static struct cdev_handle *current_cdev = NULL;
++extern pthread_key_t cdev_key;
+ 
+ void
+ set_current_cdev_handle(struct cdev_handle *handle)
+ {
+-	current_cdev = handle;
++	pthread_setspecific(cdev_key, handle);
+ }
+ 
+ struct cdev_handle *
+ get_current_cdev_handle(void)
+ {
+-	return current_cdev;
++	return (struct cdev_handle *) pthread_getspecific(cdev_key);
+ }
+ 
+ #endif
+-- 
+2.15.2 (Apple Git-101.1)
+

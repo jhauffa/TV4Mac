@@ -1,0 +1,1029 @@
+From ced285ce95542c69c9198fe006c47295c5778a73 Mon Sep 17 00:00:00 2001
+From: Jan Hauffa <jhauffa@gmail.com>
+Date: Sun, 19 Jan 2014 23:18:43 +0100
+Subject: [PATCH 2/4] experimental port to webcamd
+
+---
+ Makefile                                      |   4 +-
+ src/input/mpegts.h                            |   8 +
+ src/input/mpegts/linuxdvb/linuxdvb_adapter.c  |  30 +++-
+ src/input/mpegts/linuxdvb/linuxdvb_device.c   |  21 ++-
+ src/input/mpegts/linuxdvb/linuxdvb_frontend.c | 217 +++++++++++++++++++++++++-
+ src/input/mpegts/linuxdvb/linuxdvb_lnb.c      |  12 ++
+ src/input/mpegts/linuxdvb/linuxdvb_private.h  |  21 +++
+ src/input/mpegts/linuxdvb/linuxdvb_rotor.c    |  22 +++
+ src/input/mpegts/linuxdvb/linuxdvb_satconf.c  |  42 +++++
+ src/input/mpegts/linuxdvb/linuxdvb_switch.c   |  14 ++
+ src/input/mpegts/mpegts_input.c               |   9 ++
+ src/input/mpegts/mpegts_mux.c                 |  11 ++
+ src/main.c                                    |  12 ++
+ 13 files changed, 415 insertions(+), 8 deletions(-)
+
+diff --git a/Makefile b/Makefile
+index 649c99f4..6da02ca6 100644
+--- a/Makefile
++++ b/Makefile
+@@ -37,7 +37,9 @@ endif
+ CFLAGS  += -g -funsigned-char -O2 
+ CFLAGS  += -D_FILE_OFFSET_BITS=64
+ CFLAGS  += -I${BUILDDIR} -I${ROOTDIR}/src -I${ROOTDIR}
+-ifneq ($(PLATFORM),Darwin)
++ifeq ($(PLATFORM),Darwin)
++LDFLAGS += -lwebcamd
++else
+ LDFLAGS += -lrt
+ endif
+ LDFLAGS += -ldl -lpthread -lm
+diff --git a/src/input/mpegts.h b/src/input/mpegts.h
+index 168fdd74..a83aa2db 100644
+--- a/src/input/mpegts.h
++++ b/src/input/mpegts.h
+@@ -25,6 +25,10 @@
+ #include "mpegts/dvb.h"
+ #include "subscriptions.h"
+ 
++#ifdef __APPLE__
++#include <webcamd.h>
++#endif
++
+ #define MPEGTS_ONID_NONE        0xFFFF
+ #define MPEGTS_TSID_NONE        0xFFFF
+ #define MPEGTS_PSI_SECTION_SIZE 5000
+@@ -101,7 +105,11 @@ typedef struct mpegts_pid_sub
+ typedef struct mpegts_pid
+ {
+   int                      mp_pid;
++#ifndef __APPLE__
+   int                      mp_fd;   // linuxdvb demux fd
++#else
++  struct cdev_handle *     mp_fd;
++#endif
+   RB_HEAD(,mpegts_pid_sub) mp_subs; // subscribers to pid
+   RB_ENTRY(mpegts_pid)     mp_link;
+ } mpegts_pid_t;
+diff --git a/src/input/mpegts/linuxdvb/linuxdvb_adapter.c b/src/input/mpegts/linuxdvb/linuxdvb_adapter.c
+index b75d0032..5e9e9548 100644
+--- a/src/input/mpegts/linuxdvb/linuxdvb_adapter.c
++++ b/src/input/mpegts/linuxdvb/linuxdvb_adapter.c
+@@ -201,13 +201,15 @@ linuxdvb_adapter_find_by_number ( int adapter )
+ void
+ linuxdvb_adapter_added ( int adapter )
+ {
+-  int i, r, fd, save = 0;
++  int i, r, save = 0;
+   char fe_path[512], dmx_path[512], dvr_path[512];
+   linuxdvb_adapter_t *la = NULL;
+   struct dvb_frontend_info dfi;
+ 
++#ifndef __APPLE__
+   /* Process each frontend */
+   for (i = 0; i < 32; i++) {
++    int fd;
+     snprintf(fe_path, sizeof(fe_path), FE_PATH, adapter, i);
+ 
+     /* No access */
+@@ -238,6 +240,30 @@ linuxdvb_adapter_added ( int adapter )
+       snprintf(dvr_path, sizeof(dvr_path), DVR_PATH, adapter, 0);
+       if (access(dvr_path, R_OK | W_OK)) continue;
+     }
++#else
++    /* Only one frontend, pass adapter index (V4B "subdev" index) as frontend
++       number to allow linuxdvb_frontend to construct other device IDs. */
++    i = adapter;
++
++    struct cdev_handle *fd;
++    fd = linux_open(F_V4B_MKDEV(F_V4B_DVB_FRONTEND, i, 0),
++      O_RDONLY | O_NONBLOCK);
++    if (fd == NULL) {
++      tvhlog(LOG_ERR, "linuxdvb", "unable to open %s", fe_path);
++      return;
++    }
++
++    r = linux_ioctl(fd, O_RDONLY, FE_GET_INFO, &dfi);
++    linux_close(fd);
++    if(r) {
++      tvhlog(LOG_ERR, "linuxdvb", "unable to query %s", fe_path);
++      return;
++    }
++
++    snprintf(fe_path, sizeof(fe_path), FE_PATH, adapter, 0);
++    snprintf(dmx_path, sizeof(dmx_path), DMX_PATH, adapter, 0);
++    snprintf(dvr_path, sizeof(dvr_path), DVR_PATH, adapter, 0);
++#endif
+ 
+     /* Create/Find adapter */
+     if (!la) {
+@@ -257,7 +283,9 @@ linuxdvb_adapter_added ( int adapter )
+     tvhlog(LOG_DEBUG, "linuxdvb", "fe_create(%p, %s, %s, %s)",
+            la, fe_path, dmx_path, dvr_path);
+     save |= linuxdvb_frontend_added(la, i, fe_path, dmx_path, dvr_path, &dfi);
++#ifndef __APPLE__
+   }
++#endif
+ 
+   if (save)
+     linuxdvb_device_save(la->la_device);
+diff --git a/src/input/mpegts/linuxdvb/linuxdvb_device.c b/src/input/mpegts/linuxdvb/linuxdvb_device.c
+index 68a5396c..f2f82cc5 100644
+--- a/src/input/mpegts/linuxdvb/linuxdvb_device.c
++++ b/src/input/mpegts/linuxdvb/linuxdvb_device.c
+@@ -325,9 +325,14 @@ linuxdvb_device_find_by_adapter ( int a )
+ void linuxdvb_device_init ( int adapter_mask )
+ {
+   int a;
+-  DIR *dp;
+   htsmsg_t *s, *e;
+   htsmsg_field_t *f;
++#ifndef __APPLE__
++  DIR *dp;
++#else
++  int i;
++  struct cdev_handle *fd;
++#endif
+ 
+   /* Load configuration */
+   if ((s = hts_settings_load_r(1, "input/linuxdvb/devices"))) {
+@@ -339,6 +344,7 @@ void linuxdvb_device_init ( int adapter_mask )
+   }
+ 
+   /* Scan for hardware */
++#ifndef __APPLE__
+   if ((dp = opendir("/dev/dvb"))) {
+     struct dirent *de;
+     while ((de = readdir(dp))) {
+@@ -348,6 +354,19 @@ void linuxdvb_device_init ( int adapter_mask )
+     }
+     closedir(dp);
+   }
++#else
++  for (i = 0; i < F_V4B_SUBDEV_MAX; i++) {
++    if (!((0x1 << a) & adapter_mask))
++      continue;
++
++    a = F_V4B_MKDEV(F_V4B_DVB_FRONTEND, i, 0);
++    fd = linux_open(a, O_RDONLY | O_NONBLOCK);
++    if (fd != NULL) {
++      linux_close(fd);
++      linuxdvb_adapter_added(i);
++    }
++  }
++#endif
+ 
+   // TODO: add udev support for hotplug
+ }
+diff --git a/src/input/mpegts/linuxdvb/linuxdvb_frontend.c b/src/input/mpegts/linuxdvb/linuxdvb_frontend.c
+index e5a5d1e4..c56d959a 100644
+--- a/src/input/mpegts/linuxdvb/linuxdvb_frontend.c
++++ b/src/input/mpegts/linuxdvb/linuxdvb_frontend.c
+@@ -26,6 +26,9 @@
+ #include <sys/ioctl.h>
+ #include <sys/types.h>
+ #include <sys/stat.h>
++#ifdef __APPLE__
++#include <sys/poll.h>
++#endif
+ #include <unistd.h>
+ #include <fcntl.h>
+ #include <assert.h>
+@@ -36,6 +39,27 @@ linuxdvb_frontend_monitor ( void *aux );
+ static void *
+ linuxdvb_frontend_input_thread ( void *aux );
+ 
++#ifdef __APPLE__
++static pthread_mutex_t dvb_event_lock = PTHREAD_MUTEX_INITIALIZER;
++static pthread_cond_t dvb_event_cond = PTHREAD_COND_INITIALIZER;
++
++static void
++signal_dvb_event(void)
++{
++  pthread_mutex_lock(&dvb_event_lock);
++  pthread_cond_broadcast(&dvb_event_cond);
++  pthread_mutex_unlock(&dvb_event_lock);
++}
++
++static void
++wait_dvb_event(void)
++{
++  pthread_mutex_lock(&dvb_event_lock);
++  pthread_cond_wait(&dvb_event_cond, &dvb_event_lock);
++  pthread_mutex_unlock(&dvb_event_lock);
++}
++#endif
++
+ /* **************************************************************************
+  * Class definition
+  * *************************************************************************/
+@@ -265,10 +289,20 @@ const idclass_t linuxdvb_frontend_atsc_class =
+ static int
+ linuxdvb_frontend_is_enabled ( mpegts_input_t *mi )
+ {
++#ifdef __APPLE__
++  struct cdev_handle *fd;
++#endif
+   linuxdvb_frontend_t *lfe = (linuxdvb_frontend_t*)mi;
+   if (lfe->lfe_fe_path == NULL) return 0;
+   if (!lfe->mi_enabled) return 0;
++#ifndef __APPLE__
+   if (access(lfe->lfe_fe_path, R_OK | W_OK)) return 0;
++#else
++  fd = linux_open(F_V4B_MKDEV(F_V4B_DVB_FRONTEND, lfe->lfe_number, 0),
++    O_RDONLY | O_NONBLOCK);
++  if (fd == NULL) return 0;
++  linux_close(fd);
++#endif
+   return 1;
+ }
+ 
+@@ -286,6 +320,9 @@ linuxdvb_frontend_stop_mux
+   /* Stop thread */
+   if (lfe->lfe_dvr_pipe.wr > 0) {
+     tvh_write(lfe->lfe_dvr_pipe.wr, "", 1);
++#ifdef __APPLE__
++    signal_dvb_event();
++#endif
+     tvhtrace("linuxdvb", "%s - waiting for dvr thread", buf1);
+     pthread_join(lfe->lfe_dvr_thread, NULL);
+     tvh_pipe_close(&lfe->lfe_dvr_pipe);
+@@ -313,11 +350,18 @@ linuxdvb_frontend_open_pid0
+ {
+   char name[256];
+   struct dmx_pes_filter_params dmx_param;
+-  int fd;
+ 
+   /* Already opened */
++#ifndef __APPLE__
++  int fd;
+   if (mp->mp_fd != -1)
+     return;
++#else
++  int r;
++  struct cdev_handle *fd;
++  if (mp->mp_fd != NULL)
++    return;
++#endif
+ 
+   /* Not locked OR full mux mode */
+   if (!lfe->lfe_locked || lfe->lfe_fullmux)
+@@ -326,16 +370,30 @@ linuxdvb_frontend_open_pid0
+   lfe->mi_display_name((mpegts_input_t*)lfe, name, sizeof(name));
+ 
+   /* Open DMX */
++#ifndef __APPLE__
+   fd = tvh_open(lfe->lfe_dmx_path, O_RDWR, 0);
+   if(fd == -1) {
+     tvherror("linuxdvb", "%s - failed to open dmx for pid %d [e=%s]",
+              name, mp->mp_pid, strerror(errno));
+     return;
+   }
++#else
++  fd = linux_open(F_V4B_MKDEV(F_V4B_DVB_DEMUX, lfe->lfe_number, 0), O_RDWR);
++  if(fd == NULL) {
++    tvherror("linuxdvb", "%s - failed to open dmx for pid %d",
++             name, mp->mp_pid);
++    return;
++  }
++#endif
+ 
+   /* Install filter */
++#ifndef __APPLE__
+   tvhtrace("linuxdvb", "%s - open PID %04X (%d) fd %d",
+            name, mp->mp_pid, mp->mp_pid, fd);
++#else
++  tvhtrace("linuxdvb", "%s - open PID %04X (%d) fd %p",
++           name, mp->mp_pid, mp->mp_pid, fd);
++#endif
+   memset(&dmx_param, 0, sizeof(dmx_param));
+   dmx_param.pid      = mp->mp_pid;
+   dmx_param.input    = DMX_IN_FRONTEND;
+@@ -343,12 +401,21 @@ linuxdvb_frontend_open_pid0
+   dmx_param.pes_type = DMX_PES_OTHER;
+   dmx_param.flags    = DMX_IMMEDIATE_START;
+ 
++#ifndef __APPLE__
+   if(ioctl(fd, DMX_SET_PES_FILTER, &dmx_param)) {
+     tvherror("linuxdvb", "%s - failed to config dmx for pid %d [e=%s]",
+              name, mp->mp_pid, strerror(errno));
+     close(fd);
+     return;
+   }
++#else
++  if((r = linux_ioctl(fd, O_RDWR, DMX_SET_PES_FILTER, &dmx_param))) {
++    tvherror("linuxdvb", "%s - failed to config dmx for pid %d [e=%s]",
++             name, mp->mp_pid, strerror(-r));
++    linux_close(fd);
++    return;
++  }
++#endif
+ 
+   /* Store */
+   mp->mp_fd = fd;
+@@ -436,10 +503,14 @@ linuxdvb_frontend_monitor ( void *aux )
+   struct dtv_property fe_properties[6];
+   struct dtv_properties dtv_prop;
+ #endif
++#ifdef __APPLE__
++  int r;
++#endif
+ 
+   lfe->mi_display_name((mpegts_input_t*)lfe, buf, sizeof(buf));
+   tvhtrace("linuxdvb", "%s - checking FE status", buf);
+ 
++#ifndef __APPLE__
+   /* Close FE */
+   if (lfe->lfe_fe_fd > 0 && !mmi && !lfe->lfe_noclosefe) {
+     tvhtrace("linuxdvb", "%s - closing frontend", buf);
+@@ -455,13 +526,39 @@ linuxdvb_frontend_monitor ( void *aux )
+       return;
+     }
+   }
++#else
++  /* Close FE */
++  if (lfe->lfe_fe_fd != NULL && !mmi && !lfe->lfe_noclosefe) {
++    tvhtrace("linuxdvb", "%s - closing frontend", buf);
++    linux_close(lfe->lfe_fe_fd);
++    lfe->lfe_fe_fd = NULL;
++  }
++
++  /* Check accessibility */
++  if (lfe->lfe_fe_fd == NULL) {
++    struct cdev_handle *fd = linux_open(
++      F_V4B_MKDEV(F_V4B_DVB_FRONTEND, lfe->lfe_number, 0),
++      O_RDONLY | O_NONBLOCK);
++    if (fd == NULL) {
++      tvherror("linuxdvb", "%s - device is not accessible", buf);
++      // TODO: disable device
++      return;
++    }
++    linux_close(fd);
++  }
++#endif
+ 
+   gtimer_arm(&lfe->lfe_monitor_timer, linuxdvb_frontend_monitor, lfe, 1);
+   if (!mmi) return;
+ 
+   /* Get current status */
++#ifndef __APPLE__
+   if (ioctl(lfe->lfe_fe_fd, FE_READ_STATUS, &fe_status) == -1) {
+     tvhwarn("linuxdvb", "%s - FE_READ_STATUS error %s", buf, strerror(errno));
++#else
++  if ((r = linux_ioctl(lfe->lfe_fe_fd, O_RDONLY, FE_READ_STATUS, &fe_status))) {
++    tvhwarn("linuxdvb", "%s - FE_READ_STATUS error %s", buf, strerror(-r));
++#endif
+     /* TODO: check error value */
+     return;
+ 
+@@ -544,7 +641,11 @@ linuxdvb_frontend_monitor ( void *aux )
+   dtv_prop.num = 6;
+   dtv_prop.props = fe_properties;
+ 
++#ifndef __APPLE__
+   if(!ioctl(lfe->lfe_fe_fd, FE_GET_PROPERTY, &dtv_prop)) {
++#else
++  if(!linux_ioctl(lfe->lfe_fe_fd, O_RDONLY, FE_GET_PROPERTY, &dtv_prop)) {
++#endif
+     if(fe_properties[0].u.st.len > 0) {
+       if(fe_properties[0].u.st.stat[0].scale == FE_SCALE_RELATIVE)
+         mmi->mmi_stats.signal = (fe_properties[0].u.st.stat[0].uvalue * 100) / 0xffff;
+@@ -591,6 +692,7 @@ linuxdvb_frontend_monitor ( void *aux )
+   } else
+ #endif
+   {
++#ifndef __APPLE__
+     if (!ioctl(lfe->lfe_fe_fd, FE_READ_SIGNAL_STRENGTH, &u16))
+       mmi->mmi_stats.signal = u16;
+     if (!ioctl(lfe->lfe_fe_fd, FE_READ_BER, &u32))
+@@ -599,6 +701,17 @@ linuxdvb_frontend_monitor ( void *aux )
+       mmi->mmi_stats.snr = u16;
+     if (!ioctl(lfe->lfe_fe_fd, FE_READ_UNCORRECTED_BLOCKS, &u32))
+       mmi->mmi_stats.unc = u32;
++#else
++    if (!linux_ioctl(lfe->lfe_fe_fd, O_RDONLY, FE_READ_SIGNAL_STRENGTH, &u16))
++      mmi->mmi_stats.signal = u16;
++    if (!linux_ioctl(lfe->lfe_fe_fd, O_RDONLY, FE_READ_BER, &u32))
++      mmi->mmi_stats.ber = u32;
++    if (!linux_ioctl(lfe->lfe_fe_fd, O_RDONLY, FE_READ_SNR, &u16))
++      mmi->mmi_stats.snr = u16;
++    if (!linux_ioctl(lfe->lfe_fe_fd, O_RDONLY, FE_READ_UNCORRECTED_BLOCKS,
++        &u32))
++      mmi->mmi_stats.unc = u32;
++#endif
+   }
+ }
+ 
+@@ -607,15 +720,21 @@ linuxdvb_frontend_input_thread ( void *aux )
+ {
+   linuxdvb_frontend_t *lfe = aux;
+   mpegts_mux_instance_t *mmi;
++#ifndef __APPLE__
+   int dmx = -1, dvr = -1;
++  tvhpoll_event_t ev[2];
++  tvhpoll_t *efd;
++  int nfds;
++#else
++  struct cdev_handle *dmx = NULL, *dvr = NULL;
++  int r;
++#endif
+   char buf[256];
+   uint8_t tsb[18800];
+-  int pos = 0, nfds;
++  int pos = 0;
+   ssize_t c;
+-  tvhpoll_event_t ev[2];
+   struct dmx_pes_filter_params dmx_param;
+   int fullmux;
+-  tvhpoll_t *efd;
+ 
+   /* Get MMI */
+   pthread_mutex_lock(&lfe->lfe_dvr_lock);
+@@ -628,8 +747,13 @@ linuxdvb_frontend_input_thread ( void *aux )
+ 
+   /* Open DMX */
+   if (fullmux) {
++#ifndef __APPLE__
+     dmx = tvh_open(lfe->lfe_dmx_path, O_RDWR, 0);
+     if (dmx < 0) {
++#else
++    dmx = linux_open(F_V4B_MKDEV(F_V4B_DVB_DEMUX, lfe->lfe_number, 0), O_RDWR);
++    if (dmx == NULL) {
++#endif
+       tvherror("linuxdvb", "%s - failed to open %s", buf, lfe->lfe_dmx_path);
+       return NULL;
+     }
+@@ -639,22 +763,37 @@ linuxdvb_frontend_input_thread ( void *aux )
+     dmx_param.output   = DMX_OUT_TS_TAP;
+     dmx_param.pes_type = DMX_PES_OTHER;
+     dmx_param.flags    = DMX_IMMEDIATE_START;
++#ifndef __APPLE__
+     if(ioctl(dmx, DMX_SET_PES_FILTER, &dmx_param) == -1) {
+       tvherror("linuxdvb", "%s - open raw filter failed [e=%s]",
+                buf, strerror(errno));
+       close(dmx);
++#else
++    if((r = linux_ioctl(dmx, O_RDWR, DMX_SET_PES_FILTER, &dmx_param))) {
++      tvherror("linuxdvb", "%s - open raw filter failed [e=%s]",
++               buf, strerror(-r));
++      linux_close(dmx);
++#endif
+       return NULL;
+     }
+   }
+ 
+   /* Open DVR */
++#ifndef __APPLE__
+   dvr = tvh_open(lfe->lfe_dvr_path, O_RDONLY | O_NONBLOCK, 0);
+   if (dvr < 0) {
+     close(dmx);
++#else
++  dvr = linux_open(F_V4B_MKDEV(F_V4B_DVB_DVR, lfe->lfe_number, 0),
++    O_RDONLY | O_NONBLOCK);
++  if (dvr == NULL) {
++    linux_close(dmx);
++#endif
+     tvherror("linuxdvb", "%s - failed to open %s", buf, lfe->lfe_dvr_path);
+     return NULL;
+   }
+ 
++#ifndef __APPLE__
+   /* Setup poll */
+   efd = tvhpoll_create(2);
+   memset(ev, 0, sizeof(ev));
+@@ -663,9 +802,11 @@ linuxdvb_frontend_input_thread ( void *aux )
+   ev[1].events             = TVHPOLL_IN;
+   ev[1].fd = ev[1].data.fd = lfe->lfe_dvr_pipe.rd;
+   tvhpoll_add(efd, ev, 2);
++#endif
+ 
+   /* Read */
+   while (1) {
++#ifndef __APPLE__
+     nfds = tvhpoll_wait(efd, ev, 1, 10);
+     if (nfds < 1) continue;
+     if (ev[0].data.fd != dvr) break;
+@@ -683,15 +824,42 @@ linuxdvb_frontend_input_thread ( void *aux )
+              buf, errno, strerror(errno));
+       break;
+     }
++#else
++    while ((linux_poll(dvr) & (POLLPRI | POLLIN | POLLRDNORM)) == 0) {
++      char cmd;
++      if (read(lfe->lfe_dvr_pipe.rd, &cmd, 1) == 1)
++        goto out;
++      wait_dvb_event();
++    }
++
++    c = linux_read(dvr, O_RDONLY, (char *) tsb+pos, sizeof(tsb)-pos);
++    if (c < 0) {
++      if ((c == -EAGAIN) || (c == -EINTR))
++        continue;
++      if (c == -EOVERFLOW) {
++        tvhlog(LOG_WARNING, "linuxdvb", "%s - read() EOVERFLOW", buf);
++        continue;
++      }
++      tvhlog(LOG_ERR, "linuxdvb", "%s - read() error %zd (%s)",
++             buf, c, strerror(-c));
++      break;
++    }	
++#endif
+     
+     /* Process */
+     pos = mpegts_input_recv_packets((mpegts_input_t*)lfe, mmi, tsb, c+pos,
+                                     NULL, NULL, buf);
+   }
+ 
++#ifndef __APPLE__
+   tvhpoll_destroy(efd);
+   if (dmx != -1) close(dmx);
+   close(dvr);
++#else
++out:
++  if (dmx != NULL) linux_close(dmx);
++  linux_close(dvr);
++#endif
+   return NULL;
+ }
+ 
+@@ -724,6 +892,7 @@ linuxdvb_frontend_tune0
+ 
+   /* Open FE */
+   lfe->mi_display_name((mpegts_input_t*)lfe, buf1, sizeof(buf1));
++#ifndef __APPLE__
+   if (lfe->lfe_fe_fd <= 0) {
+     lfe->lfe_fe_fd = tvh_open(lfe->lfe_fe_path, O_RDWR | O_NONBLOCK, 0);
+     tvhtrace("linuxdvb", "%s - opening FE %s (%d)", buf1, lfe->lfe_fe_path, lfe->lfe_fe_fd);
+@@ -731,6 +900,16 @@ linuxdvb_frontend_tune0
+       return SM_CODE_TUNING_FAILED;
+     }
+   }
++#else
++  if (lfe->lfe_fe_fd == NULL) {
++    lfe->lfe_fe_fd = linux_open(
++      F_V4B_MKDEV(F_V4B_DVB_FRONTEND, lfe->lfe_number, 0), O_RDWR | O_NONBLOCK);
++    tvhtrace("linuxdvb", "%s - opening FE %s (%p)", buf1, lfe->lfe_fe_path, lfe->lfe_fe_fd);
++    if (lfe->lfe_fe_fd == NULL) {
++      return SM_CODE_TUNING_FAILED;
++    }
++  }
++#endif
+   lfe->lfe_locked = 0;
+   lfe->lfe_status = 0;
+ 
+@@ -749,7 +928,12 @@ linuxdvb_frontend_tune0
+     .num = 1,
+     .props = clear_p
+   };
++#ifndef __APPLE__
+   if ((ioctl(lfe->lfe_fe_fd, FE_SET_PROPERTY, &clear_cmdseq)) != 0)
++#else
++  if ((linux_ioctl(lfe->lfe_fe_fd, O_RDWR, FE_SET_PROPERTY,
++      &clear_cmdseq)) != 0)
++#endif
+     return -1;
+ 
+   if (freq == (uint32_t)-1)
+@@ -814,7 +998,11 @@ linuxdvb_frontend_tune0
+ 
+   /* discard stale events */
+   while (1) {
++#ifndef __APPLE__
+     if (ioctl(lfe->lfe_fe_fd, FE_GET_EVENT, &ev) == -1)
++#else
++    if (linux_ioctl(lfe->lfe_fe_fd, O_RDWR, FE_GET_EVENT, &ev) != 0)
++#endif
+       break;
+   }
+ 
+@@ -825,18 +1013,33 @@ linuxdvb_frontend_tune0
+   for (i = 0; i < cmdseq.num; i++)
+     tvhtrace("linuxdvb", "S2CMD %02u => %u", cmds[i].cmd, cmds[i].u.data);
+ #endif
++#ifndef __APPLE__
+   r = ioctl(lfe->lfe_fe_fd, FE_SET_PROPERTY, &cmdseq);
++#else
++  r = linux_ioctl(lfe->lfe_fe_fd, O_RDWR, FE_SET_PROPERTY, &cmdseq);
++#endif
+ 
+   /* v3 tuning */
+ #else
++#ifndef __APPLE__
+   r = ioctl(lfe->lfe_fe_fd, FE_SET_FRONTEND, p);
++#else
++  r = linux_ioctl(lfe->lfe_fe_fd, O_RDWR, FE_SET_FRONTEND, p);
++#endif
+ #endif
+ 
+   /* Failed */
+   if (r != 0) {
++#ifndef __APPLE__
+     tvherror("linuxdvb", "%s - failed to tune [e=%s]", buf1, strerror(errno));
+     if (errno == EINVAL)
+       mmi->mmi_tune_failed = 1;
++#else
++    tvherror("linuxdvb", "%s - failed to tune [e=%s]", buf1, strerror(-r));
++    if (r == -EINVAL)
++      mmi->mmi_tune_failed = 1;
++    r = -1;
++#endif
+     return SM_CODE_TUNING_FAILED;
+   }
+ 
+@@ -921,7 +1124,11 @@ linuxdvb_frontend_create0
+   /* DVR lock/cond */
+   pthread_mutex_init(&lfe->lfe_dvr_lock, NULL);
+   pthread_cond_init(&lfe->lfe_dvr_cond, NULL);
+- 
++
++#ifdef __APPLE__
++  set_poll_callback(signal_dvb_event);
++#endif
++
+   /* Start table thread */
+   tvhthread_create(&tid, NULL, mpegts_input_table_thread, lfe, 1);
+ 
+diff --git a/src/input/mpegts/linuxdvb/linuxdvb_lnb.c b/src/input/mpegts/linuxdvb/linuxdvb_lnb.c
+index 49a4328a..92947b8d 100644
+--- a/src/input/mpegts/linuxdvb/linuxdvb_lnb.c
++++ b/src/input/mpegts/linuxdvb/linuxdvb_lnb.c
+@@ -102,8 +102,14 @@ linuxdvb_lnb_standard_pol
+ }
+ 
+ static int 
++#ifndef __APPLE__
+ linuxdvb_lnb_standard_tune
+   ( linuxdvb_diseqc_t *ld, linuxdvb_mux_t *lm, linuxdvb_satconf_ele_t *ls, int fd )
++#else
++linuxdvb_lnb_standard_tune
++  ( linuxdvb_diseqc_t *ld, linuxdvb_mux_t *lm, linuxdvb_satconf_ele_t *ls,
++    struct cdev_handle *fd )
++#endif
+ {
+   int pol = linuxdvb_lnb_standard_pol((linuxdvb_lnb_t*)ld, lm);
+   return linuxdvb_diseqc_set_volt(fd, pol);
+@@ -147,8 +153,14 @@ linuxdvb_lnb_bandstack_pol
+ }
+ 
+ static int
++#ifndef __APPLE__
+ linuxdvb_lnb_bandstack_tune
+   ( linuxdvb_diseqc_t *ld, linuxdvb_mux_t *lm, linuxdvb_satconf_ele_t *ls, int fd )
++#else
++linuxdvb_lnb_bandstack_tune
++  ( linuxdvb_diseqc_t *ld, linuxdvb_mux_t *lm, linuxdvb_satconf_ele_t *ls,
++    struct cdev_handle *fd )
++#endif
+ {
+   int pol = linuxdvb_lnb_bandstack_pol((linuxdvb_lnb_t*)ld, lm);
+   return linuxdvb_diseqc_set_volt(fd, pol);
+diff --git a/src/input/mpegts/linuxdvb/linuxdvb_private.h b/src/input/mpegts/linuxdvb/linuxdvb_private.h
+index 06a44fff..4d1f47b0 100644
+--- a/src/input/mpegts/linuxdvb/linuxdvb_private.h
++++ b/src/input/mpegts/linuxdvb/linuxdvb_private.h
+@@ -22,6 +22,10 @@
+ 
+ #include "input/mpegts.h"
+ 
++#ifdef __APPLE__
++#include <webcamd.h>
++#endif
++
+ /* Max allowed frequency variation for something to be considered the same */
+ #define LINUXDVB_FREQ_TOL 2000
+ 
+@@ -124,7 +128,11 @@ struct linuxdvb_frontend
+   /*
+    * Reception
+    */
++#ifndef __APPLE__
+   int                       lfe_fe_fd;
++#else
++  struct cdev_handle *      lfe_fe_fd;
++#endif
+   pthread_t                 lfe_dvr_thread;
+   th_pipe_t                 lfe_dvr_pipe;
+   pthread_mutex_t           lfe_dvr_lock;
+@@ -207,8 +215,13 @@ struct linuxdvb_diseqc
+   const char           *ld_type;
+   linuxdvb_satconf_ele_t   *ld_satconf;
+   int (*ld_grace) (linuxdvb_diseqc_t *ld, linuxdvb_mux_t *lm);
++#ifndef __APPLE__
+   int (*ld_tune)  (linuxdvb_diseqc_t *ld, linuxdvb_mux_t *lm,
+                    linuxdvb_satconf_ele_t *ls, int fd);
++#else
++  int (*ld_tune)  (linuxdvb_diseqc_t *ld, linuxdvb_mux_t *lm,
++                   linuxdvb_satconf_ele_t *ls, struct cdev_handle *fd);
++#endif
+ };
+ 
+ struct linuxdvb_lnb
+@@ -338,10 +351,18 @@ htsmsg_t *linuxdvb_lnb_list    ( void *o );
+ htsmsg_t *linuxdvb_switch_list ( void *o );
+ htsmsg_t *linuxdvb_rotor_list  ( void *o );
+ 
++#ifndef __APPLE__
+ int
+ linuxdvb_diseqc_send
+   (int fd, uint8_t framing, uint8_t addr, uint8_t cmd, uint8_t len, ...);
+ int linuxdvb_diseqc_set_volt (int fd, int volt);
++#else
++int
++linuxdvb_diseqc_send
++  (struct cdev_handle *fd, uint8_t framing, uint8_t addr, uint8_t cmd,
++   uint8_t len, ...);
++int linuxdvb_diseqc_set_volt (struct cdev_handle *fd, int volt);
++#endif
+ 
+ /*
+  * Satconf
+diff --git a/src/input/mpegts/linuxdvb/linuxdvb_rotor.c b/src/input/mpegts/linuxdvb/linuxdvb_rotor.c
+index 6d9b19b3..1231458c 100644
+--- a/src/input/mpegts/linuxdvb/linuxdvb_rotor.c
++++ b/src/input/mpegts/linuxdvb/linuxdvb_rotor.c
+@@ -130,8 +130,14 @@ const idclass_t linuxdvb_rotor_usals_class =
+ 
+ /* GotoX */
+ static int
++#ifndef __APPLE__
+ linuxdvb_rotor_gotox_tune
+   ( linuxdvb_rotor_t *lr, linuxdvb_mux_t *lm, linuxdvb_satconf_ele_t *ls, int fd )
++#else
++linuxdvb_rotor_gotox_tune
++  ( linuxdvb_rotor_t *lr, linuxdvb_mux_t *lm, linuxdvb_satconf_ele_t *ls,
++    struct cdev_handle *fd )
++#endif
+ {
+   int i;
+   for (i = 0; i <= ls->ls_parent->ls_diseqc_repeats; i++) {
+@@ -148,8 +154,14 @@ linuxdvb_rotor_gotox_tune
+ 
+ /* USALS */
+ static int
++#ifndef __APPLE__
+ linuxdvb_rotor_usals_tune
+   ( linuxdvb_rotor_t *lr, linuxdvb_mux_t *lm, linuxdvb_satconf_ele_t *ls, int fd )
++#else
++linuxdvb_rotor_usals_tune
++  ( linuxdvb_rotor_t *lr, linuxdvb_mux_t *lm, linuxdvb_satconf_ele_t *ls,
++    struct cdev_handle *fd )
++#endif
+ {
+   /*
+    * Code originally written in PR #238 by Jason Millard jsm174
+@@ -217,13 +229,23 @@ linuxdvb_rotor_usals_tune
+ }
+ 
+ static int
++#ifndef __APPLE__
+ linuxdvb_rotor_tune
+   ( linuxdvb_diseqc_t *ld, linuxdvb_mux_t *lm, linuxdvb_satconf_ele_t *ls, int fd )
++#else
++linuxdvb_rotor_tune
++  ( linuxdvb_diseqc_t *ld, linuxdvb_mux_t *lm, linuxdvb_satconf_ele_t *ls,
++    struct cdev_handle *fd )
++#endif
+ {
+   linuxdvb_rotor_t *lr = (linuxdvb_rotor_t*)ld;
+ 
+   /* Force to 18v (quicker movement) */
++#ifndef __APPLE__
+   if (ioctl(fd, FE_SET_VOLTAGE, SEC_VOLTAGE_18)) {
++#else
++  if (linux_ioctl(fd, O_RDWR, FE_SET_VOLTAGE, (void *) SEC_VOLTAGE_18)) {
++#endif
+     tvherror("diseqc", "failed to set 18v for rotor movement");
+     return -1;
+   }
+diff --git a/src/input/mpegts/linuxdvb/linuxdvb_satconf.c b/src/input/mpegts/linuxdvb/linuxdvb_satconf.c
+index 99fbaeed..2c5e0da6 100644
+--- a/src/input/mpegts/linuxdvb/linuxdvb_satconf.c
++++ b/src/input/mpegts/linuxdvb/linuxdvb_satconf.c
+@@ -766,7 +766,11 @@ linuxdvb_satconf_ele_tune ( linuxdvb_satconf_ele_t *lse )
+   //       and/or re-affirm the switch
+ 
+   /* Disable tone */
++#ifndef __APPLE__
+   if (ioctl(lfe->lfe_fe_fd, FE_SET_TONE, SEC_TONE_OFF)) {
++#else
++  if (linux_ioctl(lfe->lfe_fe_fd, O_RDWR, FE_SET_TONE, (void *) SEC_TONE_OFF)) {
++#endif
+     tvherror("diseqc", "failed to disable tone");
+     return -1;
+   }
+@@ -791,10 +795,19 @@ linuxdvb_satconf_ele_tune ( linuxdvb_satconf_ele_t *lse )
+   /* Set the tone */
+   b = lse->ls_lnb->lnb_band(lse->ls_lnb, lm);
+   tvhtrace("disqec", "set diseqc tone %s", b ? "on" : "off");
++#ifndef __APPLE__
+   if (ioctl(lfe->lfe_fe_fd, FE_SET_TONE, b ? SEC_TONE_ON : SEC_TONE_OFF)) {
+     tvherror("diseqc", "failed to set diseqc tone (e=%s)", strerror(errno));
+     return -1;
+   }
++#else
++  r = linux_ioctl(lfe->lfe_fe_fd, O_RDWR, FE_SET_TONE,
++    (void *) (b ? SEC_TONE_ON : SEC_TONE_OFF));
++  if (r) {
++    tvherror("diseqc", "failed to set diseqc tone (e=%s)", strerror(-r));
++    return -1;
++  }
++#endif
+   usleep(20000); // Allow LNB to settle before tuning
+ 
+   /* Frontend */
+@@ -1055,8 +1068,14 @@ linuxdvb_diseqc_destroy ( linuxdvb_diseqc_t *ld )
+ }
+ 
+ int
++#ifndef __APPLE__
+ linuxdvb_diseqc_send
+   (int fd, uint8_t framing, uint8_t addr, uint8_t cmd, uint8_t len, ...)
++#else
++linuxdvb_diseqc_send
++  (struct cdev_handle *fd, uint8_t framing, uint8_t addr, uint8_t cmd,
++   uint8_t len, ...)
++#endif
+ {
+   int i;
+   va_list ap;
+@@ -1084,22 +1103,45 @@ linuxdvb_diseqc_send
+            len + 3, framing, addr, cmd, buf);
+ 
+   /* Send */
++#ifndef __APPLE__
+   if (ioctl(fd, FE_DISEQC_SEND_MASTER_CMD, &message)) {
+     tvherror("disqec", "failed to send diseqc cmd (e=%s)", strerror(errno));
+     return -1;
+   }
++#else
++  if ((i = linux_ioctl(fd, O_RDWR, FE_DISEQC_SEND_MASTER_CMD, &message))) {
++    tvherror("disqec", "failed to send diseqc cmd (e=%s)", strerror(-i));
++    return -1;
++  }
++#endif
+   return 0;
+ }
+ 
+ int
++#ifndef __APPLE__
+ linuxdvb_diseqc_set_volt ( int fd, int vol )
++#else
++linuxdvb_diseqc_set_volt ( struct cdev_handle *fd, int vol )
++#endif
+ {
++#ifdef __APPLE__
++  int r;
++#endif
++
+   /* Set voltage */
+   tvhtrace("disqec", "set voltage %dV", vol ? 18 : 13);
++#ifndef __APPLE__
+   if (ioctl(fd, FE_SET_VOLTAGE, vol ? SEC_VOLTAGE_18 : SEC_VOLTAGE_13)) {
+     tvherror("diseqc", "failed to set voltage (e=%s)", strerror(errno));
+     return -1;
+   }
++#else
++  if ((r = linux_ioctl(fd, O_RDWR, FE_SET_VOLTAGE,
++        (void *) (vol ? SEC_VOLTAGE_18 : SEC_VOLTAGE_13)))) {
++    tvherror("diseqc", "failed to set voltage (e=%s)", strerror(-r));
++    return -1;
++  }
++#endif
+   usleep(15000);
+   return 0;
+ }
+diff --git a/src/input/mpegts/linuxdvb/linuxdvb_switch.c b/src/input/mpegts/linuxdvb/linuxdvb_switch.c
+index 9bf559de..2e8ba6e0 100644
+--- a/src/input/mpegts/linuxdvb/linuxdvb_switch.c
++++ b/src/input/mpegts/linuxdvb/linuxdvb_switch.c
+@@ -111,8 +111,14 @@ const idclass_t linuxdvb_switch_class =
+  * *************************************************************************/
+ 
+ static int
++#ifndef __APPLE__
+ linuxdvb_switch_tune
+   ( linuxdvb_diseqc_t *ld, linuxdvb_mux_t *lm, linuxdvb_satconf_ele_t *sc, int fd )
++#else
++linuxdvb_switch_tune
++  ( linuxdvb_diseqc_t *ld, linuxdvb_mux_t *lm, linuxdvb_satconf_ele_t *sc,
++    struct cdev_handle *fd )
++#endif
+ {
+   int i, com, r1 = 0, r2 = 0;
+   int pol, band;
+@@ -157,11 +163,19 @@ linuxdvb_switch_tune
+ 
+   /* Tone burst */
+   tvhtrace("diseqc", "toneburst %s", ls->ls_toneburst ? "B" : "A");
++#ifndef __APPLE__
+   if (ioctl(fd, FE_DISEQC_SEND_BURST,
+             ls->ls_toneburst ? SEC_MINI_B : SEC_MINI_A)) {
+     tvherror("diseqc", "failed to set toneburst (e=%s)", strerror(errno));
+     return -1;
+   }
++#else
++  if ((i = linux_ioctl(fd, O_RDWR, FE_DISEQC_SEND_BURST,
++            (void *) (ls->ls_toneburst ? SEC_MINI_B : SEC_MINI_A)))) {
++    tvherror("diseqc", "failed to set toneburst (e=%s)", strerror(-i));
++    return -1;
++  }
++#endif
+ 
+   return 0;
+ }
+diff --git a/src/input/mpegts/mpegts_input.c b/src/input/mpegts/mpegts_input.c
+index ad2a9e53..4f45b973 100644
+--- a/src/input/mpegts/mpegts_input.c
++++ b/src/input/mpegts/mpegts_input.c
+@@ -200,12 +200,21 @@ mpegts_input_close_pid
+ 
+     if (!RB_FIRST(&mp->mp_subs)) {
+       RB_REMOVE(&mm->mm_pids, mp, mp_link);
++#ifndef __APPLE__
+       if (mp->mp_fd != -1) {
+         mm->mm_display_name(mm, buf, sizeof(buf));
+         tvhdebug("mpegts", "%s - close PID %04X (%d) [%d/%p]",
+                buf, mp->mp_pid, mp->mp_pid, type, owner);
+         close(mp->mp_fd);
+       }
++#else
++      if (mp->mp_fd != NULL) {
++        mm->mm_display_name(mm, buf, sizeof(buf));
++        tvhdebug("mpegts", "%s - close PID %04X (%d) [%d/%p]",
++               buf, mp->mp_pid, mp->mp_pid, type, owner);
++        linux_close(mp->mp_fd);
++      }
++#endif
+       free(mp);
+     }
+   }
+diff --git a/src/input/mpegts/mpegts_mux.c b/src/input/mpegts/mpegts_mux.c
+index 17c02cce..8770480b 100644
+--- a/src/input/mpegts/mpegts_mux.c
++++ b/src/input/mpegts/mpegts_mux.c
+@@ -538,10 +538,17 @@ mpegts_mux_stop ( mpegts_mux_t *mm, int force )
+       free(mps);
+     }
+     RB_REMOVE(&mm->mm_pids, mp, mp_link);
++#ifndef __APPLE__
+     if (mp->mp_fd != -1) {
+       tvhdebug("mpegts", "%s - close PID %04X (%d)", buf, mp->mp_pid, mp->mp_pid);
+       close(mp->mp_fd);
+     }
++#else
++    if (mp->mp_fd != NULL) {
++      tvhdebug("mpegts", "%s - close PID %04X (%d)", buf, mp->mp_pid, mp->mp_pid);
++      linux_close(mp->mp_fd);
++    }
++#endif
+     free(mp);
+   }
+ 
+@@ -913,7 +920,11 @@ mpegts_mux_find_pid ( mpegts_mux_t *mm, int pid, int create )
+     if (!mp) {
+       mp        = skel;
+       skel      = NULL;
++#ifndef __APPLE__
+       mp->mp_fd = -1;
++#else
++      mp->mp_fd = NULL;
++#endif
+     }
+   }
+   return mp;
+diff --git a/src/main.c b/src/main.c
+index 7829c7f9..db18bbe2 100644
+--- a/src/main.c
++++ b/src/main.c
+@@ -39,6 +39,10 @@
+ #include <netinet/in.h>
+ #include <arpa/inet.h>
+ 
++#if defined(ENABLE_LINUXDVB) && defined(__APPLE__)
++#include <webcamd.h>
++#endif
++
+ #include "tvheadend.h"
+ #include "api.h"
+ #include "tcp.h"
+@@ -751,6 +755,10 @@ main(int argc, char **argv)
+   iptv_init();
+ #endif
+ #if ENABLE_LINUXDVB
++#ifdef __APPLE__
++  linux_parm();
++  linux_init();
++#endif
+   linuxdvb_init(adapter_mask);
+ #endif
+ 
+@@ -827,6 +835,10 @@ main(int argc, char **argv)
+ #endif
+   pthread_mutex_unlock(&global_lock);
+ 
++#if defined(ENABLE_LINUXDVB) && defined(__APPLE__)
++  linux_exit();
++#endif
++
+   tvhlog(LOG_NOTICE, "STOP", "Exiting HTS Tvheadend");
+   tvhlog_end();
+ 
+-- 
+2.15.2 (Apple Git-101.1)
+

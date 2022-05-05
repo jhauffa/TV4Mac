@@ -1,0 +1,131 @@
+From edf8fb0e29e80874bc79b922888d17e35172c4df Mon Sep 17 00:00:00 2001
+From: Jan Hauffa <jhauffa@gmail.com>
+Date: Mon, 20 Jan 2014 19:41:11 +0100
+Subject: [PATCH 15/16] do not prohibit URB resubmission
+
+---
+ kernel/macos_usb.c | 93 ++++++++++++++++++++++++++----------------------------
+ 1 file changed, 44 insertions(+), 49 deletions(-)
+
+diff --git a/kernel/macos_usb.c b/kernel/macos_usb.c
+index a1f7749..3aaee02 100644
+--- a/kernel/macos_usb.c
++++ b/kernel/macos_usb.c
+@@ -552,11 +552,9 @@ usb_transfer_callback(struct libusb_transfer *transfer)
+ 		    transfer->iso_packet_desc[i].actual_length;
+ 	}
+ 
+-	urb->bsd_no_resubmit = 1;
+ 	if (urb->complete) {
+ 		(urb->complete) (urb);
+ 	}
+-	urb->bsd_no_resubmit = 0;
+ }
+ 
+ int
+@@ -580,58 +578,55 @@ usb_submit_urb(struct urb *urb, uint16_t mem_flags)
+ 	type = (uhe->desc.bmAttributes & USB_ENDPOINT_XFERTYPE_MASK);
+ 	addr = uhe->desc.bEndpointAddress;
+ 
+-	if (urb->bsd_no_resubmit == 0) {
++	if (urb->libusb_transfer == NULL) {
++		urb->libusb_transfer = libusb_alloc_transfer(urb->number_of_packets);
+ 		if (urb->libusb_transfer == NULL) {
+-			urb->libusb_transfer =
+-			    libusb_alloc_transfer(urb->number_of_packets);
+-			if (urb->libusb_transfer == NULL) {
+-				return (-ENOMEM);
+-			}
++			return (-ENOMEM);
+ 		}
+-		urb->status = USB_TRANSFER_PENDING;
++	}
++	urb->status = USB_TRANSFER_PENDING;
+ 
+-		urb->libusb_transfer->dev_handle = urb->dev->libusb_handle;
+-		urb->libusb_transfer->flags = 0;
+-		if (urb->transfer_flags & URB_SHORT_NOT_OK) {
+-			urb->libusb_transfer->flags |= LIBUSB_TRANSFER_SHORT_NOT_OK;
+-		}
+-		/* TODO: might need to emulate this */
+-		if (urb->transfer_flags & URB_ZERO_PACKET) {
+-			urb->libusb_transfer->flags |= LIBUSB_TRANSFER_ADD_ZERO_PACKET;
+-		}
+-		urb->libusb_transfer->endpoint = addr;
+-		urb->libusb_transfer->type = type;
+-		if ((type == USB_ENDPOINT_XFER_ISOC) && (urb->timeout == 0)) {
+-			urb->libusb_transfer->timeout = 250;
+-		} else {
+-			urb->libusb_transfer->timeout = urb->timeout;
+-		}
+-		urb->libusb_transfer->length = urb->transfer_buffer_length;
+-		urb->libusb_transfer->callback = usb_transfer_callback;
+-		urb->libusb_transfer->user_data = urb;
+-		urb->libusb_transfer->buffer = urb->transfer_buffer;
+-		urb->libusb_transfer->num_iso_packets = urb->number_of_packets;
+-
+-		expected_offset = 0;
+-		for (i = 0; i < urb->number_of_packets; i++) {
+-			if (urb->iso_frame_desc[i].offset != expected_offset) {
+-				return (-EINVAL);
+-			}
+-			expected_offset += urb->iso_frame_desc[i].length;
+-			urb->libusb_transfer->iso_packet_desc[i].length =
+-			    urb->iso_frame_desc[i].length;
++	urb->libusb_transfer->dev_handle = urb->dev->libusb_handle;
++	urb->libusb_transfer->flags = 0;
++	if (urb->transfer_flags & URB_SHORT_NOT_OK) {
++		urb->libusb_transfer->flags |= LIBUSB_TRANSFER_SHORT_NOT_OK;
++	}
++	/* TODO: might need to emulate this */
++	if (urb->transfer_flags & URB_ZERO_PACKET) {
++		urb->libusb_transfer->flags |= LIBUSB_TRANSFER_ADD_ZERO_PACKET;
++	}
++	urb->libusb_transfer->endpoint = addr;
++	urb->libusb_transfer->type = type;
++	if ((type == USB_ENDPOINT_XFER_ISOC) && (urb->timeout == 0)) {
++		urb->libusb_transfer->timeout = 250;
++	} else {
++		urb->libusb_transfer->timeout = urb->timeout;
++	}
++	urb->libusb_transfer->length = urb->transfer_buffer_length;
++	urb->libusb_transfer->callback = usb_transfer_callback;
++	urb->libusb_transfer->user_data = urb;
++	urb->libusb_transfer->buffer = urb->transfer_buffer;
++	urb->libusb_transfer->num_iso_packets = urb->number_of_packets;
++
++	expected_offset = 0;
++	for (i = 0; i < urb->number_of_packets; i++) {
++		if (urb->iso_frame_desc[i].offset != expected_offset) {
++			return (-EINVAL);
+ 		}
++		expected_offset += urb->iso_frame_desc[i].length;
++		urb->libusb_transfer->iso_packet_desc[i].length =
++		    urb->iso_frame_desc[i].length;
++	}
+ 
+-		err = libusb_submit_transfer(urb->libusb_transfer);
+-		if (err < 0) {
+-			switch (err) {
+-			case LIBUSB_ERROR_NO_DEVICE:
+-				return (-ENODEV);
+-			case LIBUSB_ERROR_BUSY:
+-				return (-EINPROGRESS);
+-			default:
+-				return (-EINVAL);
+-			}
++	err = libusb_submit_transfer(urb->libusb_transfer);
++	if (err < 0) {
++		switch (err) {
++		case LIBUSB_ERROR_NO_DEVICE:
++			return (-ENODEV);
++		case LIBUSB_ERROR_BUSY:
++			return (-EINPROGRESS);
++		default:
++			return (-EINVAL);
+ 		}
+ 	}
+ 
+-- 
+2.15.2 (Apple Git-101.1)
+

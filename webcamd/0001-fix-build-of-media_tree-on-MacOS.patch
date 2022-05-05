@@ -1,0 +1,275 @@
+From 76401b1b6de5a3876c10155db167499b8f51fd96 Mon Sep 17 00:00:00 2001
+From: Jan Hauffa <jhauffa@gmail.com>
+Date: Sun, 5 Jan 2014 11:49:58 +0100
+Subject: [PATCH 01/16] fix build of media_tree on MacOS
+
+---
+ kernel/linux_defs.h          | 23 ++++++++++++++++++++
+ kernel/linux_func.h          | 16 ++++++++++++++
+ kernel/linux_start_section.h | 12 ++++++++---
+ kernel/linux_usb.h           | 14 +++++++++++++
+ patches/do_patch.sh          | 50 +++++++++++++++++++++++++-------------------
+ webcamd_global.h             |  8 +++++++
+ 6 files changed, 98 insertions(+), 25 deletions(-)
+
+diff --git a/kernel/linux_defs.h b/kernel/linux_defs.h
+index ca2daa5..38aee32 100644
+--- a/kernel/linux_defs.h
++++ b/kernel/linux_defs.h
+@@ -75,6 +75,14 @@
+ #define	_PAGE_USER      0
+ #define	_PAGE_ACCESSED  0
+ #define	PAGE_SHARED 0
++
++#ifndef PAGE_SIZE
++#define PAGE_SIZE 4096
++#endif
++#ifndef PAGE_SHIFT
++#define PAGE_SHIFT 12
++#endif
++
+ #define	PAGE_ALIGN(addr)        (((addr)+PAGE_SIZE-1)&(~(PAGE_SIZE - 1)))
+ #undef ALIGN
+ #define	ALIGN(x,a)		(((x)+(a)-1)&(~((a)-1)))
+@@ -458,6 +466,13 @@
+ #define	IRQ_NONE 0
+ #define	IRQ_HANDLED 1
+ 
++#ifndef CLOCK_REALTIME
++#define CLOCK_REALTIME 0
++#endif
++#ifndef CLOCK_MONOTONIC
++#define CLOCK_MONOTONIC 1
++#endif
++
+ #if (defined(BYTE_ORDER) && defined(LITTLE_ENDIAN) && defined(BIG_ENDIAN))
+ #if (BYTE_ORDER == LITTLE_ENDIAN)
+ #ifndef __LITTLE_ENDIAN
+@@ -510,7 +525,15 @@ typedef long long loff_t;
+ 
+ #endif
+ typedef unsigned int gfp_t;
++
++#ifndef __APPLE__
+ typedef uint32_t dev_t;
++#endif
++
+ typedef struct timespec ktime_t;
+ 
++#ifndef __always_inline
++#define __always_inline inline
++#endif
++
+ #endif					/* _LINUX_DEFS_H_ */
+diff --git a/kernel/linux_func.h b/kernel/linux_func.h
+index 9c2537a..3938703 100644
+--- a/kernel/linux_func.h
++++ b/kernel/linux_func.h
+@@ -1,7 +1,23 @@
+ #ifndef _LINUX_FUNC_H_
+ #define	_LINUX_FUNC_H_
+ 
++#ifndef __APPLE__
+ #include <sys/endian.h>
++#else
++#include <libkern/OSByteOrder.h>
++#define htobe16 OSSwapHostToBigInt16
++#define htole16 OSSwapHostToLittleInt16
++#define be16toh OSSwapBigToHostInt16
++#define le16toh OSSwapLittleToHostInt16
++#define htobe32 OSSwapHostToBigInt32
++#define htole32 OSSwapHostToLittleInt32
++#define be32toh OSSwapBigToHostInt32
++#define le32toh OSSwapLittleToHostInt32
++#define htobe64 OSSwapHostToBigInt64
++#define htole64 OSSwapHostToLittleInt64
++#define be64toh OSSwapBigToHostInt64
++#define le64toh OSSwapLittleToHostInt64
++#endif
+ 
+ int	zero_nop(void);
+ 
+diff --git a/kernel/linux_start_section.h b/kernel/linux_start_section.h
+index 63cf0ec..70b3088 100644
+--- a/kernel/linux_start_section.h
++++ b/kernel/linux_start_section.h
+@@ -45,14 +45,20 @@ struct module_exit_struct {
+ 
+ #define	subsys_initcall(f) module_init(f)
+ 
++#ifndef __APPLE__
++#define SECTION_NAME(x) __section__(x)
++#else
++#define SECTION_NAME(x) __section__("DATA,"x)
++#endif
++
+ #define	module_parm_init(func) static struct module_init_struct \
+-  __attribute__((__section__("linux_parm_mod"),__used__,__aligned__(1))) func##_p = { func, MODULE_PARM_MAGIC };
++  __attribute__((SECTION_NAME("linux_parm_mod"),__used__,__aligned__(1))) func##_p = { func, MODULE_PARM_MAGIC };
+ 
+ #define	module_init(func) static struct module_init_struct \
+-  __attribute__((__section__("linux_init_mod"),__used__,__aligned__(1))) func##_p = { func, MODULE_INIT_MAGIC };
++  __attribute__((SECTION_NAME("linux_init_mod"),__used__,__aligned__(1))) func##_p = { func, MODULE_INIT_MAGIC };
+ 
+ #define	module_exit(func) static struct module_exit_struct \
+-  __attribute__((__section__("linux_exit_mod"),__used__,__aligned__(1))) func##_p = { func, MODULE_EXIT_MAGIC };
++  __attribute__((SECTION_NAME("linux_exit_mod"),__used__,__aligned__(1))) func##_p = { func, MODULE_EXIT_MAGIC };
+ 
+ #define	late_initcall(x) module_init(x)	/* XXX FIXME LATER */
+ 
+diff --git a/kernel/linux_usb.h b/kernel/linux_usb.h
+index c6ede22..f674d29 100644
+--- a/kernel/linux_usb.h
++++ b/kernel/linux_usb.h
+@@ -56,11 +56,19 @@ typedef void (*usb_complete_t)(struct urb *);
+ #define	USB_MAX_HIGH_SPEED_ISOC_FRAMES (60 * 8)
+ 
+ #define	USB_SPEED_UNKNOWN 255		/* XXX */
++#ifndef __APPLE__
+ #define	USB_SPEED_LOW LIBUSB20_SPEED_LOW
+ #define	USB_SPEED_FULL LIBUSB20_SPEED_FULL
+ #define	USB_SPEED_HIGH LIBUSB20_SPEED_HIGH
+ #define	USB_SPEED_VARIABLE LIBUSB20_SPEED_VARIABLE
+ #define	USB_SPEED_SUPER LIBUSB20_SPEED_SUPER
++#else
++#define	USB_SPEED_LOW LIBUSB_SPEED_LOW
++#define	USB_SPEED_FULL LIBUSB_SPEED_FULL
++#define	USB_SPEED_HIGH LIBUSB_SPEED_HIGH
++#define	USB_SPEED_VARIABLE LIBUSB_SPEED_HIGH
++#define	USB_SPEED_SUPER LIBUSB_SPEED_SUPER
++#endif
+ 
+ #define	USB_CTRL_GET_TIMEOUT    5000	/* ms */
+ #define	USB_CTRL_SET_TIMEOUT    5000	/* ms */
+@@ -463,7 +471,11 @@ struct usb_host_endpoint {
+ 
+ 	TAILQ_HEAD(, urb) bsd_urb_list;
+ 
++#ifndef __APPLE__
+ 	struct libusb20_transfer *bsd_xfer[2];
++#else
++	struct libusb_transfer *bsd_xfer[2];
++#endif
+ 
+ 	uint8_t *extra;			/* Extra descriptors */
+ 
+@@ -527,7 +539,9 @@ struct usb_device {
+ 	struct usb_config bsd_config;
+ 	struct usb_host_endpoint ep0;
+ 
++#ifndef __APPLE__
+ 	struct libusb20_device *bsd_udev;
++#endif
+ 	struct usb_interface *bsd_iface_start;
+ 	struct usb_interface *bsd_iface_end;
+ 	struct usb_host_endpoint *bsd_endpoint_start;
+diff --git a/patches/do_patch.sh b/patches/do_patch.sh
+index 118e53b..30ca949 100755
+--- a/patches/do_patch.sh
++++ b/patches/do_patch.sh
+@@ -1,5 +1,11 @@
+ #!/bin/sh
+ 
++PATCH='patch'
++UNAMESTR=`uname`
++if [[ "$UNAMESTR" == 'Darwin' ]]; then
++   PATCH='gpatch'
++fi
++
+ OPT='-Nslf'
+ 
+ #
+@@ -112,27 +118,27 @@ find_media_file adv7343.c
+ find_media_file tvp7002.c
+ find_media_file sdr-msi3101.c
+ 
+-patch $OPT $(find_media_file dvb_frontend.c) dvb_frontend.c.diff
+-patch $OPT -R $(find_media_file uvc_video.c) uvc_video.c.diff
+-patch $OPT -R $(find_media_file uvcvideo.h) uvcvideo.h.diff
+-patch $OPT -R $(find_media_file v4l2-dev.c) v4l2-dev.c.diff
+-patch $OPT $(find_media_file v4l2-async.c) v4l2-async.c.diff
+-patch $OPT $(find_media_file videobuf2-core.c) videobuf2-core.c.diff
+-patch $OPT $(find_media_file videobuf2-memops.c) videobuf2-memops.c.diff
+-patch $OPT $(find_media_file videobuf2-vmalloc.c) videobuf2-vmalloc.c.diff
+-patch $OPT -R $(find_media_file frontend.h) frontend.h.diff
+-patch $OPT -R $(find_media_file input.h) input.h.diff
+-patch $OPT $(find_media_file as102_drv.h) as102_drv.h.diff
+-patch $OPT $(find_media_file usb-urb.c) usb-urb.c.diff
+-patch $OPT $(find_media_file usb_urb.c) usb_urb.c.diff
+-patch $OPT $(find_media_file gspca.c) gspca.diff 
+-patch $OPT $(find_media_file stk-webcam.h) stk-webcam.h.diff
+-patch $OPT $(find_media_file ca.h) ca.h.diff
+-patch $OPT $(find_media_file wacom.h) wacom.h.diff
+-patch $OPT $(find_media_file tvp514x.c) tvp514x.c.diff
+-patch $OPT $(find_media_file adv7343.c) adv7343.c.diff
+-patch $OPT $(find_media_file tvp7002.c) tvp7002.c.diff
+-patch $OPT $(find_media_file sdr-msi3101.c) sdr-msi3101.c.diff
++$PATCH $OPT $(find_media_file dvb_frontend.c) dvb_frontend.c.diff
++$PATCH $OPT -R $(find_media_file uvc_video.c) uvc_video.c.diff
++$PATCH $OPT -R $(find_media_file uvcvideo.h) uvcvideo.h.diff
++$PATCH $OPT -R $(find_media_file v4l2-dev.c) v4l2-dev.c.diff
++$PATCH $OPT $(find_media_file v4l2-async.c) v4l2-async.c.diff
++$PATCH $OPT $(find_media_file videobuf2-core.c) videobuf2-core.c.diff
++$PATCH $OPT $(find_media_file videobuf2-memops.c) videobuf2-memops.c.diff
++$PATCH $OPT $(find_media_file videobuf2-vmalloc.c) videobuf2-vmalloc.c.diff
++$PATCH $OPT -R $(find_media_file frontend.h) frontend.h.diff
++$PATCH $OPT -R $(find_media_file input.h) input.h.diff
++$PATCH $OPT $(find_media_file as102_drv.h) as102_drv.h.diff
++$PATCH $OPT $(find_media_file usb-urb.c) usb-urb.c.diff
++$PATCH $OPT $(find_media_file usb_urb.c) usb_urb.c.diff
++$PATCH $OPT $(find_media_file gspca.c) gspca.diff 
++$PATCH $OPT $(find_media_file stk-webcam.h) stk-webcam.h.diff
++$PATCH $OPT $(find_media_file ca.h) ca.h.diff
++$PATCH $OPT $(find_media_file wacom.h) wacom.h.diff
++$PATCH $OPT $(find_media_file tvp514x.c) tvp514x.c.diff
++$PATCH $OPT $(find_media_file adv7343.c) adv7343.c.diff
++$PATCH $OPT $(find_media_file tvp7002.c) tvp7002.c.diff
++$PATCH $OPT $(find_media_file sdr-msi3101.c) sdr-msi3101.c.diff
+ 
+ [ -f ../media_tree/drivers/media/common/tuners/tda18212.c ] && sed -e "s/dbg[(]/dib_&/g" -i .orig $(find_media_file tda18212.c)
+ sed -e "s/err[(]/cx_&/g" -e "s/info[(]/cx_&/g" -i .orig $(find_media_file cx24123.c)
+@@ -147,6 +153,6 @@ sed -e "s/[ 	]err[(]/ mxl_err(/g" -e "s/[ 	]info[(]/ mxl_info(/g" -e "s/define.e
+ sed -e "s/[ 	]err[(]/ mxl_err(/g" -e "s/[ 	]info[(]/ mxl_info(/g" -e "s/define.err./define mxl_err /g" -e "s/define.info./define mxl_info /g" -i .orig $(find_media_file mxl111sf.c)
+ 
+ # DVBSKY support
+-[ -f dvbsky-linux-3.9-hps-v2.diff ] && (cat dvbsky-linux-3.9-hps-v2.diff | patch $OPT -d ../media_tree -p1) && echo "Applied DVBSKY patches ..."
++[ -f dvbsky-linux-3.9-hps-v2.diff ] && (cat dvbsky-linux-3.9-hps-v2.diff | $PATCH $OPT -d ../media_tree -p1) && echo "Applied DVBSKY patches ..."
+ 
+ exit 0
+diff --git a/webcamd_global.h b/webcamd_global.h
+index da25171..84634bc 100644
+--- a/webcamd_global.h
++++ b/webcamd_global.h
+@@ -32,12 +32,16 @@
+ 
+ #include <sys/types.h>
+ #include <sys/queue.h>
++#ifndef __APPLE__
+ #include <sys/ctype.h>
++#endif
+ #include <sys/ioccom.h>
+ #include <sys/msg.h>
+ #include <sys/time.h>
+ #include <sys/resource.h>
++#ifndef __APPLE__
+ #include <sys/limits.h>
++#endif
+ 
+ #include <netinet/in.h>
+ 
+@@ -54,8 +58,12 @@
+ #include <fcntl.h>
+ #include <stdbool.h>
+ 
++#ifndef __APPLE__
+ #include <libusb20.h>
+ #include <libusb20_desc.h>
++#else
++#include <libusb.h>
++#endif
+ 
+ #include <kernel/linux_defs.h>
+ #include <kernel/linux_struct.h>
+-- 
+2.15.2 (Apple Git-101.1)
+

@@ -1,0 +1,167 @@
+From a4ec980198585218b138ecd100e2ddbbba6486e9 Mon Sep 17 00:00:00 2001
+From: Jan Hauffa <jhauffa@gmail.com>
+Date: Mon, 13 Jan 2014 23:21:15 +0100
+Subject: [PATCH 07/16] hide local symbols
+
+---
+ Makefile                     |  5 ++++-
+ kernel/linux_file.c          | 14 +++++++-------
+ kernel/linux_mod_param.c     |  6 +++---
+ kernel/linux_start_section.c |  6 +++---
+ 4 files changed, 17 insertions(+), 14 deletions(-)
+
+diff --git a/Makefile b/Makefile
+index ebeda46..23e95ab 100644
+--- a/Makefile
++++ b/Makefile
+@@ -137,6 +137,9 @@ CFLAGS+= -DBITS_PER_LONG=${BITS_PER_LONG}
+ CFLAGS+= -DLINUX
+ CFLAGS+= -Wall -Wno-pointer-sign
+ CFLAGS+= -Wno-unused-variable -Wno-unused-value -Wno-unused-function
++.if defined(HAVE_MACOS)
++CFLAGS+= -fvisibility=hidden
++.endif
+ 
+ CFLAGS+= -I${.CURDIR}
+ CFLAGS+= -I${.CURDIR}/dummy
+@@ -307,7 +310,7 @@ help:
+ 
+ .SUFFIXES: .oo
+ .c.oo:
+-	$(CC) -c $< -o $@
++	$(CC) -fvisibility=hidden -c $< -o $@
+ 
+ tools/linux_make/linux_make:
+ 	make -C tools/linux_make
+diff --git a/kernel/linux_file.c b/kernel/linux_file.c
+index 6f55193..c0f7e86 100644
+--- a/kernel/linux_file.c
++++ b/kernel/linux_file.c
+@@ -30,7 +30,7 @@
+ #include <cuse4bsd.h>
+ #endif
+ 
+-struct cdev_handle *
++__attribute__((visibility("default"))) struct cdev_handle *
+ linux_open(int f_v4b, int fflags)
+ {
+ 	struct cdev *cdev = cdev_get_device(f_v4b);
+@@ -67,7 +67,7 @@ linux_open(int f_v4b, int fflags)
+ 	return (handle);
+ }
+ 
+-int
++__attribute__((visibility("default"))) int
+ linux_close(struct cdev_handle *handle)
+ {
+ 	int i;
+@@ -125,7 +125,7 @@ linux_fix_f_flags(struct file *fp, int fflags)
+ }
+ #endif
+ 
+-int
++__attribute__((visibility("default"))) int
+ linux_ioctl(struct cdev_handle *handle, int fflags,
+     unsigned int cmd, void *arg)
+ {
+@@ -148,7 +148,7 @@ linux_ioctl(struct cdev_handle *handle, int fflags,
+ 		return (-EINVAL);
+ }
+ 
+-int
++__attribute__((visibility("default"))) int
+ linux_poll(struct cdev_handle *handle)
+ {
+ 	int error;
+@@ -168,7 +168,7 @@ linux_poll(struct cdev_handle *handle)
+ 	return (error);
+ }
+ 
+-ssize_t
++__attribute__((visibility("default"))) ssize_t
+ linux_read(struct cdev_handle *handle, int fflags, char *ptr, size_t len)
+ {
+ 	loff_t off = 0;
+@@ -191,7 +191,7 @@ linux_read(struct cdev_handle *handle, int fflags, char *ptr, size_t len)
+ 	return (error);
+ }
+ 
+-ssize_t
++__attribute__((visibility("default"))) ssize_t
+ linux_write(struct cdev_handle *handle, int fflags, char *ptr, size_t len)
+ {
+ 	loff_t off = 0;
+@@ -214,7 +214,7 @@ linux_write(struct cdev_handle *handle, int fflags, char *ptr, size_t len)
+ 	return (error);
+ }
+ 
+-void   *
++__attribute__((visibility("default"))) void   *
+ linux_mmap(struct cdev_handle *handle, int fflags,
+     uint8_t *addr, size_t len, off_t offset)
+ {
+diff --git a/kernel/linux_mod_param.c b/kernel/linux_mod_param.c
+index 3acfd3a..77d2757 100644
+--- a/kernel/linux_mod_param.c
++++ b/kernel/linux_mod_param.c
+@@ -25,7 +25,7 @@
+ 
+ static TAILQ_HEAD(, mod_param) mod_param_head = TAILQ_HEAD_INITIALIZER(mod_param_head);
+ 
+-int
++__attribute__((visibility("default"))) int
+ mod_set_param(const char *name, const char *value)
+ {
+ 	struct mod_param *p;
+@@ -85,7 +85,7 @@ mod_output_desc(const char *desc)
+ 	putchar('\n');
+ }
+ 
+-int
++__attribute__((visibility("default"))) int
+ mod_get_int_param(const char *name)
+ {
+ 	struct mod_param *p;
+@@ -112,7 +112,7 @@ mod_get_int_param(const char *name)
+ 	return (0);
+ }
+ 
+-void
++__attribute__((visibility("default"))) void
+ mod_show_params(void)
+ {
+ 	struct mod_param *p;
+diff --git a/kernel/linux_start_section.c b/kernel/linux_start_section.c
+index da51fc0..80173e8 100644
+--- a/kernel/linux_start_section.c
++++ b/kernel/linux_start_section.c
+@@ -33,7 +33,7 @@ extern struct module_exit_struct __start_linux_exit_mod;
+ #include <mach-o/getsect.h>
+ #endif
+ 
+-void
++__attribute__((visibility("default"))) void
+ linux_parm(void)
+ {
+ #ifndef __APPLE__
+@@ -50,7 +50,7 @@ linux_parm(void)
+ 	}
+ }
+ 
+-void
++__attribute__((visibility("default"))) void
+ linux_init(void)
+ {
+ #ifndef __APPLE__
+@@ -75,7 +75,7 @@ linux_init(void)
+ #endif
+ }
+ 
+-void
++__attribute__((visibility("default"))) void
+ linux_exit(void)
+ {
+ #ifndef __APPLE__
+-- 
+2.15.2 (Apple Git-101.1)
+

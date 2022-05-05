@@ -1,0 +1,120 @@
+From 391ca6a9d7263fe407d567ca87d4855ec745ad7f Mon Sep 17 00:00:00 2001
+From: Jan Hauffa <jhauffa@gmail.com>
+Date: Tue, 14 Jan 2014 04:10:32 +0100
+Subject: [PATCH 09/16] fix section data access and link order
+
+---
+ Makefile                     | 15 +++++++++++++++
+ kernel/linux_start_section.c | 44 ++++++++++++++++++++++++++++++++++++++------
+ 2 files changed, 53 insertions(+), 6 deletions(-)
+
+diff --git a/Makefile b/Makefile
+index a113920..2cc1e48 100644
+--- a/Makefile
++++ b/Makefile
+@@ -242,7 +242,22 @@ LIB=
+ SHLIB= webcamd
+ SHLIB_MAJOR= 1
+ SHLIB_MINOR= 0
++
+ .include <bsd.lib.mk>
++
++# Override linker rule as not to invoke lorder, which messes up the order of
++# initializer functions.
++.PHONY: linkorder
++linkorder: ${SOBJS}
++	@${ECHO} building shared library ${SHLIB_NAME}
++	@rm -f ${SHLIB_NAME} ${SHLIB_LINK}
++.if defined(SHLIB_LINK)
++	@ln -fs ${SHLIB_NAME} ${SHLIB_LINK}
++.endif
++	@${CC} ${LDFLAGS} -dynamiclib \
++	    -o ${SHLIB_NAME} -install_name ${SONAME} \
++	    ${SOBJS} ${LDADD}
++${SHLIB_NAME}: linkorder
+ .else
+ .include <bsd.prog.mk>
+ .endif
+diff --git a/kernel/linux_start_section.c b/kernel/linux_start_section.c
+index 80173e8..77e39db 100644
+--- a/kernel/linux_start_section.c
++++ b/kernel/linux_start_section.c
+@@ -30,7 +30,42 @@ extern struct module_init_struct __start_linux_parm_mod;
+ extern struct module_init_struct __start_linux_init_mod;
+ extern struct module_exit_struct __start_linux_exit_mod;
+ #else
++#include <mach-o/dyld.h>
+ #include <mach-o/getsect.h>
++
++static const struct mach_header_64 *
++image_for_address(void *address)
++{
++	uint32_t i;
++	for (i = 0; i < _dyld_image_count(); i++) {
++		uint64_t addr = (uint64_t) address - _dyld_get_image_vmaddr_slide(i);
++
++		const struct mach_header_64 *mh =
++		    (const struct mach_header_64 *) _dyld_get_image_header(i);
++		if (mh) {
++			uint32_t j;
++			struct segment_command_64 *lc = (struct segment_command_64 *)
++			    ((char *) mh + sizeof(struct mach_header_64));
++
++			for (j = 0; j < mh->ncmds; j++) {
++				if ((LC_SEGMENT_64 == lc->cmd) &&
++				    (addr >= lc->vmaddr) && (addr < lc->vmaddr + lc->vmsize)) {
++					return mh;
++				}
++				lc = (struct segment_command_64 *) ((char *) lc + lc->cmdsize);
++			}
++		}
++	}
++	return NULL;
++}
++
++static void *
++get_section_data(const char *name)
++{
++	unsigned long secsize;
++	const struct mach_header_64 *mh = image_for_address(&get_section_data);
++	return getsectiondata(mh, "__DATA", name, &secsize);
++}
+ #endif
+ 
+ __attribute__((visibility("default"))) void
+@@ -39,9 +74,8 @@ linux_parm(void)
+ #ifndef __APPLE__
+ 	struct module_init_struct *t = &__start_linux_parm_mod;
+ #else
+-	unsigned long secsize;
+ 	struct module_init_struct *t = (struct module_init_struct *)
+-		getsectdata("__DATA", "__linux_parm_mod", &secsize);
++		get_section_data("__linux_parm_mod");
+ #endif
+ 
+ 	while (t->magic == MODULE_PARM_MAGIC) {
+@@ -56,9 +90,8 @@ linux_init(void)
+ #ifndef __APPLE__
+ 	struct module_init_struct *t = &__start_linux_init_mod;
+ #else
+-	unsigned long secsize;
+ 	struct module_init_struct *t = (struct module_init_struct *)
+-		getsectdata("__DATA", "__linux_init_mod", &secsize);
++		get_section_data("__linux_init_mod");
+ #endif
+ 
+ 	thread_init();
+@@ -81,9 +114,8 @@ linux_exit(void)
+ #ifndef __APPLE__
+ 	struct module_exit_struct *t = &__start_linux_exit_mod;
+ #else
+-	unsigned long secsize;
+ 	struct module_init_struct *t = (struct module_init_struct *)
+-		getsectdata("__DATA", "__linux_exit_mod", &secsize);
++		get_section_data("__linux_exit_mod");
+ #endif
+ 
+ 	while (t->magic == MODULE_EXIT_MAGIC) {
+-- 
+2.15.2 (Apple Git-101.1)
+

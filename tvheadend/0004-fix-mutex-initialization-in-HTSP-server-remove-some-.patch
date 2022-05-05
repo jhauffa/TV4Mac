@@ -1,0 +1,59 @@
+From ac5a25199e66b2189dd0db16774b29ce6a07d982 Mon Sep 17 00:00:00 2001
+From: Jan Hauffa <jhauffa@gmail.com>
+Date: Sat, 1 Feb 2014 21:33:26 +0100
+Subject: [PATCH 4/4] fix mutex initialization in HTSP server, remove some dead
+ code
+
+---
+ src/htsp_server.c | 7 ++++++-
+ src/imagecache.h  | 2 --
+ 2 files changed, 6 insertions(+), 3 deletions(-)
+
+diff --git a/src/htsp_server.c b/src/htsp_server.c
+index 990194f6..bf39180d 100644
+--- a/src/htsp_server.c
++++ b/src/htsp_server.c
+@@ -339,7 +339,6 @@ htsp_subscription_destroy(htsp_connection_t *htsp, htsp_subscription_t *hs)
+     timeshift_destroy(hs->hs_tshift);
+ #endif
+ 
+-
+   free(hs);
+ }
+ 
+@@ -2089,6 +2088,9 @@ htsp_serve(int fd, void **opaque, struct sockaddr_storage *source,
+   LIST_INSERT_HEAD(&htsp_connections, &htsp, htsp_link);
+   pthread_mutex_unlock(&global_lock);
+ 
++  pthread_mutex_init(&htsp.htsp_out_mutex, NULL);
++  pthread_cond_init(&htsp.htsp_out_cond, NULL);
++
+   tvhthread_create(&htsp.htsp_writer_thread, NULL,
+                    htsp_write_scheduler, &htsp, 0);
+ 
+@@ -2127,6 +2129,9 @@ htsp_serve(int fd, void **opaque, struct sockaddr_storage *source,
+ 
+   pthread_join(htsp.htsp_writer_thread, NULL);
+ 
++  pthread_cond_destroy(&htsp.htsp_out_cond);
++  pthread_mutex_destroy(&htsp.htsp_out_mutex);
++
+   htsp_msg_q_t *hmq;
+ 
+   TAILQ_FOREACH(hmq, &htsp.htsp_active_output_queues, hmq_link) {
+diff --git a/src/imagecache.h b/src/imagecache.h
+index 39e24a5e..6f7e7211 100644
+--- a/src/imagecache.h
++++ b/src/imagecache.h
+@@ -30,8 +30,6 @@ struct imagecache_config {
+ 
+ extern struct imagecache_config imagecache_conf;
+ 
+-extern pthread_mutex_t imagecache_mutex;
+-
+ void     imagecache_init     ( void );
+ 
+ htsmsg_t *imagecache_get_config ( void );
+-- 
+2.15.2 (Apple Git-101.1)
+

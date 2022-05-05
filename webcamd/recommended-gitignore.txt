@@ -1,0 +1,10 @@
+.DS_Store
+do_patch.tmp
+long_size_test
+*.oo
+*.So
+*.dylib
+/media_tree
+/api/linux/videodev2.h
+/api/linux/v4l2*
+/api/linux/dvb

@@ -1,0 +1,2431 @@
+From 235db1b17340bbf036c6149c706698a81ca13c46 Mon Sep 17 00:00:00 2001
+From: Jan Hauffa <jhauffa@gmail.com>
+Date: Mon, 13 Jan 2014 22:42:31 +0100
+Subject: [PATCH 05/16] first attempt at USB implementation backed by
+ libusb-1.0, not tested
+
+---
+ Makefile                              |   4 +-
+ kernel/{linux_usb.c => freebsd_usb.c} | 699 +----------------------------
+ kernel/generic_usb.c                  | 720 ++++++++++++++++++++++++++++++
+ kernel/linux_start_section.c          |   8 +
+ kernel/linux_usb.h                    |  21 +-
+ kernel/macos_usb.c                    | 796 ++++++++++++++++++++++++++++++++++
+ 6 files changed, 1549 insertions(+), 699 deletions(-)
+ rename kernel/{linux_usb.c => freebsd_usb.c} (71%)
+ create mode 100644 kernel/generic_usb.c
+ create mode 100644 kernel/macos_usb.c
+
+diff --git a/Makefile b/Makefile
+index 6f05fe2..ebeda46 100644
+--- a/Makefile
++++ b/Makefile
+@@ -211,7 +211,9 @@ SRCS+= linux_file.c
+ SRCS+= linux_struct.c
+ SRCS+= linux_task.c
+ SRCS+= linux_timer.c
+-SRCS+= linux_usb.c
++SRCS+= generic_usb.c
++SRCS+= freebsd_usb.c
++SRCS+= macos_usb.c
+ SRCS+= linux_firmware.c
+ SRCS+= linux_i2c.c
+ SRCS+= linux_mod_param.c
+diff --git a/kernel/linux_usb.c b/kernel/freebsd_usb.c
+similarity index 71%
+rename from kernel/linux_usb.c
+rename to kernel/freebsd_usb.c
+index c8bf2aa..9016fc2 100644
+--- a/kernel/linux_usb.c
++++ b/kernel/freebsd_usb.c
+@@ -23,6 +23,8 @@
+  * SUCH DAMAGE.
+  */
+ 
++#ifndef __APPLE__
++
+ #include <signal.h>
+ 
+ #include <sys/filio.h>
+@@ -33,8 +35,6 @@ static int min_bufsize;
+ module_param(min_bufsize, int, 0644);
+ MODULE_PARM_DESC(min_bufsize, "Set minimum USB buffer size");
+ 
+-#ifndef __APPLE__
+-
+ struct usb_linux_softc {
+ 	struct libusb20_config *pcfg;
+ 	struct libusb20_device *pdev;
+@@ -63,13 +63,12 @@ static void usb_linux_cleanup_interface(struct usb_device *, struct usb_interfac
+ static void usb_linux_complete(struct libusb20_transfer *);
+ static int usb_unlink_urb_sub(struct urb *, uint8_t);
+ static int usb_setup_endpoint(struct usb_device *dev, struct usb_host_endpoint *uhe, int bufsize);
+-static struct usb_host_endpoint *usb_find_host_endpoint(struct usb_device *dev, unsigned int pipe);
+ 
+ /*------------------------------------------------------------------------*
+  * FreeBSD USB interface
+  *------------------------------------------------------------------------*/
+ 
+-static struct {
++extern struct {
+ 	struct usb_driver *lh_first;
+ }	usb_linux_driver_list;
+ 
+@@ -257,31 +256,6 @@ usb_linux_detach_sub(struct usb_linux_softc *sc)
+ 	memset(sc, 0, sizeof(*sc));
+ }
+ 
+-static void
+-usb_linux_fill_ep_info(struct usb_device *udev,
+-    struct usb_host_interface *uhi)
+-{
+-	struct usb_host_endpoint *uhe_end;
+-	struct usb_host_endpoint *uhe;
+-	uint8_t ea;
+-
+-	uhe_end = uhi->endpoint + uhi->desc.bNumEndpoints;
+-
+-	for (uhe = uhi->endpoint; uhe != uhe_end; uhe++) {
+-
+-		ea = uhe->desc.bEndpointAddress;
+-
+-		/* skip any bogus control endpoints */
+-		if ((ea & USB_ENDPOINT_NUMBER_MASK) == 0)
+-			continue;
+-
+-		if (ea & USB_ENDPOINT_DIR_MASK)
+-			udev->ep_in[ea & 15] = uhe;
+-		else
+-			udev->ep_out[ea & 15] = uhe;
+-	}
+-}
+-
+ /*------------------------------------------------------------------------*
+  *	usb_linux_probe
+  *
+@@ -989,23 +963,6 @@ failure:
+ 	return (-EINVAL);
+ }
+ 
+-static char *
+-usb_string_dup(struct usb_device *udev, uint8_t string_id)
+-{
+-	char buf[80];
+-	int size;
+-
+-	if (string_id == 0)
+-		return (strdup(""));
+-
+-	if ((size = usb_string(udev, string_id,
+-	    buf, sizeof(buf) - 1)) > 0) {
+-		buf[size] = '\0';
+-		return (strdup(buf));
+-	}
+-	return (strdup(""));
+-}
+-
+ /*------------------------------------------------------------------------*
+  *	usb_linux_create_usb_device
+  *
+@@ -1222,205 +1179,6 @@ done:
+ 	return (p_ud);
+ }
+ 
+-/*------------------------------------------------------------------------*
+- *	usb_alloc_urb
+- *
+- * This function should always be used when you allocate an URB for
+- * use with the USB Linux stack. In case of an isochronous transfer
+- * you must specifiy the maximum number of "iso_packets" which you
+- * plan to transfer per URB. This function is always blocking, and
+- * "mem_flags" are not regarded like on Linux.
+- *------------------------------------------------------------------------*/
+-struct urb *
+-usb_alloc_urb(uint16_t iso_packets, uint16_t mem_flags)
+-{
+-	struct urb *urb;
+-	uint32_t size;
+-
+-	size = sizeof(*urb) + (iso_packets * sizeof(urb->iso_frame_desc[0]));
+-
+-	urb = malloc(size);
+-	if (urb) {
+-		memset(urb, 0, size);
+-		urb->number_of_packets = iso_packets;
+-	}
+-	return (urb);
+-}
+-
+-unsigned int
+-usb_create_host_endpoint(struct usb_device *dev, uint8_t type, uint8_t ep)
+-{
+-	return ((type << 30) | ((ep & 0xFF) << 15) |
+-	    ((dev->devnum & 0x7F) << 8) | (ep & USB_DIR_IN));
+-}
+-
+-/*------------------------------------------------------------------------*
+- *	usb_find_host_endpoint
+- *
+- * The following function will return the Linux USB host endpoint
+- * structure that matches the given endpoint type and endpoint
+- * value. If no match is found, NULL is returned. This function is not
+- * part of the Linux USB API and is only used internally.
+- *------------------------------------------------------------------------*/
+-static struct usb_host_endpoint *
+-usb_find_host_endpoint(struct usb_device *dev, unsigned int pipe)
+-{
+-	struct usb_host_endpoint *uhe;
+-	struct usb_host_endpoint *uhe_end;
+-	struct usb_host_interface *uhi;
+-	struct usb_interface *ui;
+-	uint8_t ea;
+-	uint8_t at;
+-	uint8_t mask;
+-	uint8_t type = (pipe >> 30) & 3;
+-	uint8_t ep = (pipe >> 15) & 255;
+-
+-	if (dev == NULL)
+-		return (NULL);
+-
+-	if (type == USB_ENDPOINT_XFER_CONTROL)
+-		mask = USB_ENDPOINT_NUMBER_MASK;
+-	else
+-		mask = (USB_ENDPOINT_DIR_MASK | USB_ENDPOINT_NUMBER_MASK);
+-
+-	ep &= mask;
+-
+-	/*
+-	 * Iterate over all the interfaces searching the selected alternate
+-	 * setting only, and all belonging endpoints.
+-	 */
+-	for (ui = dev->bsd_iface_start;
+-	    ui != dev->bsd_iface_end;
+-	    ui++) {
+-		uhi = ui->cur_altsetting;
+-		if (uhi) {
+-			uhe_end = uhi->endpoint + uhi->desc.bNumEndpoints;
+-			for (uhe = uhi->endpoint;
+-			    uhe != uhe_end;
+-			    uhe++) {
+-				ea = uhe->desc.bEndpointAddress;
+-				at = uhe->desc.bmAttributes;
+-
+-				if (((ea & mask) == ep) &&
+-				    ((at & USB_ENDPOINT_XFERTYPE_MASK) == type)) {
+-					return (uhe);
+-				}
+-			}
+-		}
+-	}
+-
+-	if ((type == USB_ENDPOINT_XFER_CONTROL) &&
+-	    ((ep & USB_ENDPOINT_NUMBER_MASK) == 0)) {
+-		return (&dev->ep0);
+-	}
+-	return (NULL);
+-}
+-
+-/*------------------------------------------------------------------------*
+- *	usb_altnum_to_altsetting
+- *
+- * The following function returns a pointer to an alternate setting by
+- * index given a "usb_interface" pointer. If the alternate setting by
+- * index does not exist, NULL is returned. And alternate setting is a
+- * variant of an interface, but usually with slightly different
+- * characteristics.
+- *------------------------------------------------------------------------*/
+-struct usb_host_interface *
+-usb_altnum_to_altsetting(const struct usb_interface *intf, uint8_t alt_index)
+-{
+-	if (alt_index >= intf->num_altsetting) {
+-		return (NULL);
+-	}
+-	return (intf->altsetting + alt_index);
+-}
+-
+-/*------------------------------------------------------------------------*
+- *	usb_ifnum_to_if
+- *
+- * The following function searches up an USB interface by
+- * "bInterfaceNumber". If no match is found, NULL is returned.
+- *------------------------------------------------------------------------*/
+-struct usb_interface *
+-usb_ifnum_to_if(struct usb_device *dev, uint8_t iface_no)
+-{
+-	struct usb_interface *p_ui;
+-
+-	for (p_ui = dev->bsd_iface_start;
+-	    p_ui != dev->bsd_iface_end;
+-	    p_ui++) {
+-		if ((p_ui->num_altsetting > 0) &&
+-		    (p_ui->altsetting->desc.bInterfaceNumber == iface_no)) {
+-			return (p_ui);
+-		}
+-	}
+-	return (NULL);
+-}
+-
+-/*------------------------------------------------------------------------*
+- *	usb_buffer_alloc
+- *------------------------------------------------------------------------*/
+-void   *
+-usb_buffer_alloc(struct usb_device *dev, uint32_t size,
+-    uint16_t mem_flags, dma_addr_t *dma_addr)
+-{
+-	void *ptr;
+-
+-	if (dma_addr)
+-		*dma_addr = 0;
+-	ptr = malloc(size);
+-	if (ptr)
+-		memset(ptr, 0, size);
+-	return (ptr);
+-}
+-
+-/*------------------------------------------------------------------------*
+- *	usb_get_intfdata
+- *------------------------------------------------------------------------*/
+-void   *
+-usb_get_intfdata(struct usb_interface *intf)
+-{
+-	return (intf->bsd_priv_sc);
+-}
+-
+-/*------------------------------------------------------------------------*
+- *	usb_register
+- *
+- * The following function is used by the "USB_DRIVER_EXPORT()" macro,
+- * and is used to register a Linux USB driver, so that its
+- * "usb_device_id" structures gets searched a probe time. This
+- * function is not part of the Linux USB API, and is for internal use
+- * only.
+- *------------------------------------------------------------------------*/
+-int
+-usb_register(struct usb_driver *drv)
+-{
+-	atomic_lock();
+-	LIST_INSERT_HEAD(&usb_linux_driver_list, drv, linux_driver_list);
+-	atomic_unlock();
+-
+-	return (0);
+-}
+-
+-/*------------------------------------------------------------------------*
+- *	usb_deregister
+- *
+- * The following function is used by the "USB_DRIVER_EXPORT()" macro,
+- * and is used to deregister a Linux USB driver. This function will
+- * ensure that all driver instances belonging to the Linux USB device
+- * driver in question, gets detached before the driver is
+- * unloaded. This function is not part of the Linux USB API, and is
+- * for internal use only.
+- *------------------------------------------------------------------------*/
+-int
+-usb_deregister(struct usb_driver *drv)
+-{
+-	atomic_lock();
+-	LIST_REMOVE(drv, linux_driver_list);
+-	atomic_unlock();
+-
+-	return (0);
+-}
+-
+ /*------------------------------------------------------------------------*
+  *	usb_linux_free_device
+  *
+@@ -1449,16 +1207,6 @@ usb_linux_free_device(struct usb_device *dev)
+ 	free(dev);
+ }
+ 
+-/*------------------------------------------------------------------------*
+- *	usb_buffer_free
+- *------------------------------------------------------------------------*/
+-void
+-usb_buffer_free(struct usb_device *dev, uint32_t size,
+-    void *addr, dma_addr_t dma_addr)
+-{
+-	free(addr);
+-}
+-
+ /*------------------------------------------------------------------------*
+  *	usb_free_urb
+  *------------------------------------------------------------------------*/
+@@ -1479,22 +1227,6 @@ usb_free_urb(struct urb *urb)
+ 	free(urb);
+ }
+ 
+-/*------------------------------------------------------------------------*
+- *	usb_init_urb
+- *
+- * The following function can be used to initialize a custom URB. It
+- * is not recommended to use this function. Use "usb_alloc_urb()"
+- * instead.
+- *------------------------------------------------------------------------*/
+-void
+-usb_init_urb(struct urb *urb)
+-{
+-	if (urb == NULL)
+-		return;
+-
+-	memset(urb, 0, sizeof(*urb));
+-}
+-
+ /*------------------------------------------------------------------------*
+  *	usb_kill_urb
+  *------------------------------------------------------------------------*/
+@@ -1506,18 +1238,6 @@ usb_kill_urb(struct urb *urb)
+ 	atomic_unlock();
+ }
+ 
+-/*------------------------------------------------------------------------*
+- *	usb_set_intfdata
+- *
+- * The following function sets the per Linux USB interface private
+- * data pointer. It is used by most Linux USB device drivers.
+- *------------------------------------------------------------------------*/
+-void
+-usb_set_intfdata(struct usb_interface *intf, void *data)
+-{
+-	intf->bsd_priv_sc = data;
+-}
+-
+ /*------------------------------------------------------------------------*
+  *	usb_linux_cleanup_interface
+  *
+@@ -1843,136 +1563,6 @@ tr_setup:
+ 	}
+ }
+ 
+-/* The following functions directly derive from Linux: */
+-
+-int
+-usb_endpoint_dir_in(const struct usb_endpoint_descriptor *epd)
+-{
+-	return ((epd->bEndpointAddress & USB_ENDPOINT_DIR_MASK) == USB_DIR_IN);
+-}
+-
+-int
+-usb_endpoint_dir_out(const struct usb_endpoint_descriptor *epd)
+-{
+-	return ((epd->bEndpointAddress & USB_ENDPOINT_DIR_MASK) == USB_DIR_OUT);
+-}
+-
+-int
+-usb_endpoint_xfer_bulk(const struct usb_endpoint_descriptor *epd)
+-{
+-	return ((epd->bmAttributes & USB_ENDPOINT_XFERTYPE_MASK) == USB_ENDPOINT_XFER_BULK);
+-}
+-
+-int
+-usb_endpoint_xfer_control(const struct usb_endpoint_descriptor *epd)
+-{
+-	return ((epd->bmAttributes & USB_ENDPOINT_XFERTYPE_MASK) == USB_ENDPOINT_XFER_CONTROL);
+-}
+-
+-int
+-usb_endpoint_xfer_int(const struct usb_endpoint_descriptor *epd)
+-{
+-	return ((epd->bmAttributes & USB_ENDPOINT_XFERTYPE_MASK) == USB_ENDPOINT_XFER_INT);
+-}
+-
+-int
+-usb_endpoint_xfer_isoc(const struct usb_endpoint_descriptor *epd)
+-{
+-	return ((epd->bmAttributes & USB_ENDPOINT_XFERTYPE_MASK) == USB_ENDPOINT_XFER_ISOC);
+-}
+-
+-void
+-usb_fill_control_urb(struct urb *urb,
+-    struct usb_device *dev,
+-    unsigned int pipe,
+-    unsigned char *setup_packet,
+-    void *transfer_buffer,
+-    int buffer_length,
+-    usb_complete_t complete_fn,
+-    void *context)
+-{
+-	urb->dev = dev;
+-	urb->pipe = pipe;
+-	urb->setup_packet = setup_packet;
+-	urb->transfer_buffer = transfer_buffer;
+-	urb->transfer_buffer_length = buffer_length;
+-	urb->complete = complete_fn;
+-	urb->context = context;
+-}
+-
+-void
+-usb_fill_bulk_urb(struct urb *urb,
+-    struct usb_device *dev,
+-    unsigned int pipe,
+-    void *transfer_buffer,
+-    int buffer_length,
+-    usb_complete_t complete_fn,
+-    void *context)
+-{
+-	urb->dev = dev;
+-	urb->pipe = pipe;
+-	urb->transfer_buffer = transfer_buffer;
+-	urb->transfer_buffer_length = buffer_length;
+-	urb->complete = complete_fn;
+-	urb->context = context;
+-}
+-
+-void
+-usb_fill_int_urb(struct urb *urb,
+-    struct usb_device *dev,
+-    unsigned int pipe,
+-    void *transfer_buffer,
+-    int buffer_length,
+-    usb_complete_t complete_fn,
+-    void *context,
+-    int interval)
+-{
+-	urb->dev = dev;
+-	urb->pipe = pipe;
+-	urb->transfer_buffer = transfer_buffer;
+-	urb->transfer_buffer_length = buffer_length;
+-	urb->complete = complete_fn;
+-	urb->context = context;
+-	if (dev->speed == USB_SPEED_HIGH ||
+-	    dev->speed == USB_SPEED_SUPER ||
+-	    dev->speed == USB_SPEED_VARIABLE)
+-		urb->interval = 1 << (interval - 1);
+-	else
+-		urb->interval = interval;
+-	urb->start_frame = -1;
+-}
+-
+-struct usb_interface *
+-usb_get_intf(struct usb_interface *intf)
+-{
+-	if (intf)
+-		get_device(&intf->dev);
+-	return intf;
+-}
+-
+-void
+-usb_put_intf(struct usb_interface *intf)
+-{
+-	if (intf)
+-		put_device(&intf->dev);
+-}
+-
+-struct usb_device *
+-usb_get_dev(struct usb_device *dev)
+-{
+-	if (dev)
+-		get_device(&dev->dev);
+-
+-	return dev;
+-}
+-
+-void
+-usb_put_dev(struct usb_device *dev)
+-{
+-	if (dev)
+-		put_device(&dev->dev);
+-}
+-
+ int
+ usb_string(struct usb_device *dev, int index, char *buf, size_t size)
+ {
+@@ -1987,287 +1577,4 @@ usb_string(struct usb_device *dev, int index, char *buf, size_t size)
+ 	return (strlen(buf));
+ }
+ 
+-int
+-usb_make_path(struct usb_device *dev, char *buf, size_t size)
+-{
+-	int actual;
+-
+-	actual = snprintf(buf, size, "usb-/dev/usb-/dev/usb");
+-	return (actual >= (int)size) ? -1 : actual;
+-}
+-
+-struct api_context {
+-	struct completion done;
+-	int	status;
+-};
+-
+-static void
+-usb_api_blocking_completion(struct urb *urb)
+-{
+-	struct api_context *ctx = urb->context;
+-
+-	ctx->status = urb->status;
+-	complete(&ctx->done);
+-}
+-
+-static int
+-usb_start_wait_urb(struct urb *urb, int timeout, int *actual_length)
+-{
+-	struct api_context ctx;
+-	int retval;
+-
+-	init_completion(&ctx.done);
+-	ctx.status = -ECONNRESET;
+-
+-	urb->context = &ctx;
+-	urb->actual_length = 0;
+-	urb->timeout = timeout;
+-	retval = usb_submit_urb(urb, GFP_NOIO);
+-	if (retval == 0) {
+-		wait_for_completion(&ctx.done);
+-		retval = ctx.status;
+-	}
+-	if (actual_length)
+-		*actual_length = urb->actual_length;
+-
+-	usb_free_urb(urb);
+-	uninit_completion(&ctx.done);
+-	return (retval);
+-}
+-
+-int
+-usb_bulk_msg(struct usb_device *usb_dev, unsigned int pipe,
+-    void *data, int len, int *actual_length, int timeout)
+-{
+-	struct urb *urb;
+-
+-	urb = usb_alloc_urb(0, GFP_KERNEL);
+-	if (!urb)
+-		return (-ENOMEM);
+-
+-	if (usb_pipetype(pipe) == PIPE_INTERRUPT) {
+-		usb_fill_int_urb(urb, usb_dev, pipe, data, len,
+-		    usb_api_blocking_completion, NULL, 0);
+-	} else {
+-		usb_fill_bulk_urb(urb, usb_dev, pipe, data, len,
+-		    usb_api_blocking_completion, NULL);
+-	}
+-
+-	return (usb_start_wait_urb(urb, timeout, actual_length));
+-}
+-
+-/* Calling the usb_match_xxx() functions directly is deferred. */
+-
+-int
+-usb_match_device(struct usb_device *dev, const struct usb_device_id *id)
+-{
+-	int flags = id->match_flags;
+-
+-	if ((flags & USB_DEVICE_ID_MATCH_VENDOR) &&
+-	    (id->idVendor != le16_to_cpu(dev->descriptor.idVendor)))
+-		goto no_match;
+-
+-	if ((flags & USB_DEVICE_ID_MATCH_PRODUCT) &&
+-	    (id->idProduct != le16_to_cpu(dev->descriptor.idProduct)))
+-		goto no_match;
+-
+-	if ((flags & USB_DEVICE_ID_MATCH_DEV_LO) &&
+-	    (id->bcdDevice_lo > le16_to_cpu(dev->descriptor.bcdDevice)))
+-		goto no_match;
+-
+-	if ((flags & USB_DEVICE_ID_MATCH_DEV_HI) &&
+-	    (id->bcdDevice_hi < le16_to_cpu(dev->descriptor.bcdDevice)))
+-		goto no_match;
+-
+-	if ((flags & USB_DEVICE_ID_MATCH_DEV_CLASS) &&
+-	    (id->bDeviceClass != dev->descriptor.bDeviceClass))
+-		goto no_match;
+-
+-	if ((flags & USB_DEVICE_ID_MATCH_DEV_SUBCLASS) &&
+-	    (id->bDeviceSubClass != dev->descriptor.bDeviceSubClass))
+-		goto no_match;
+-
+-	if ((flags & USB_DEVICE_ID_MATCH_DEV_PROTOCOL) &&
+-	    (id->bDeviceProtocol != dev->descriptor.bDeviceProtocol))
+-		goto no_match;
+-
+-	return (1);
+-
+-no_match:
+-	return (0);
+-}
+-
+-int
+-usb_match_one_id(struct usb_interface *interface, const struct usb_device_id *id)
+-{
+-	struct usb_host_interface *intf;
+-	struct usb_device *dev;
+-
+-	if (id == NULL)
+-		goto no_match;
+-
+-	intf = interface->cur_altsetting;
+-	dev = interface_to_usbdev(interface);
+-
+-	if (!usb_match_device(dev, id))
+-		goto no_match;
+-
+-	if ((dev->descriptor.bDeviceClass == USB_CLASS_VENDOR_SPEC) &&
+-	    (!(id->match_flags & USB_DEVICE_ID_MATCH_VENDOR)) &&
+-	    (id->match_flags & USB_DEVICE_ID_MATCH_INT_INFO))
+-		goto no_match;
+-
+-	if ((id->match_flags & USB_DEVICE_ID_MATCH_INT_CLASS) &&
+-	    (id->bInterfaceClass != intf->desc.bInterfaceClass))
+-		goto no_match;
+-
+-	if ((id->match_flags & USB_DEVICE_ID_MATCH_INT_SUBCLASS) &&
+-	    (id->bInterfaceSubClass != intf->desc.bInterfaceSubClass))
+-		goto no_match;
+-
+-	if ((id->match_flags & USB_DEVICE_ID_MATCH_INT_PROTOCOL) &&
+-	    (id->bInterfaceProtocol != intf->desc.bInterfaceProtocol))
+-		goto no_match;
+-
+-	return (1);
+-
+-no_match:
+-	return (0);
+-}
+-
+-const struct usb_device_id *
+-usb_match_id(struct usb_interface *interface, const struct usb_device_id *id)
+-{
+-	if (id == NULL)
+-		goto no_match;
+-
+-	for (; id->match_flags; id++) {
+-		if (usb_match_one_id(interface, id))
+-			return (id);
+-	}
+-
+-	/* check for special case */
+-	if (id->driver_info != 0)
+-		return (id);
+-
+-no_match:
+-	return (NULL);
+-}
+-
+-int
+-usb_reset_configuration(struct usb_device *dev)
+-{
+-	return (-EINVAL);		/* not implemented */
+-}
+-
+-int
+-usb_lock_device_for_reset(struct usb_device *udev,
+-    const struct usb_interface *iface)
+-{
+-	return (0);
+-}
+-
+-void
+-usb_unlock_device(struct usb_device *udev)
+-{
+-
+-}
+-
+-int
+-usb_reset_device(struct usb_device *dev)
+-{
+-	return (0);
+-}
+-
+-uint8_t
+-usb_pipetype(unsigned int pipe)
+-{
+-	return ((pipe >> 30) & 3);
+-}
+-
+-int
+-usb_autopm_get_interface(struct usb_interface *intf)
+-{
+-	return (0);
+-}
+-
+-int
+-usb_autopm_set_interface(struct usb_interface *intf)
+-{
+-	return (0);
+-}
+-
+-int
+-usb_driver_claim_interface(struct usb_driver *drv,
+-    struct usb_interface *intf, void *priv)
+-{
+-	return (0);
+-}
+-
+-uint16_t
+-usb_maxpacket(struct usb_device *dev, int endpoint, int is_out)
+-{
+-	struct usb_host_endpoint *ep;
+-	uint8_t index = (endpoint >> 15) & 15;
+-
+-	if (is_out) {
+-		ep = dev->ep_out[index];
+-	} else {
+-		ep = dev->ep_in[index];
+-	}
+-	if (ep == NULL)
+-		return (0);
+-	return (le16_to_cpu(ep->desc.wMaxPacketSize));
+-}
+-
+-void
+-usb_enable_autosuspend(struct usb_device *udev)
+-{
+-}
+-
+-int
+-__usb_get_extra_descriptor(char *buffer, unsigned size,
+-    unsigned char type, void **ptr)
+-{
+-	struct usb_descriptor_header *header;
+-
+-	while (size >= sizeof(struct usb_descriptor_header)) {
+-		header = (struct usb_descriptor_header *)buffer;
+-
+-		if (header->bLength < 2)
+-			return (-1);
+-
+-		if (header->bLength < size)
+-			return (-1);
+-
+-		if (header->bDescriptorType == type) {
+-			*ptr = header;
+-			return (0);
+-		}
+-		buffer += header->bLength;
+-		size -= header->bLength;
+-	}
+-	return (-1);
+-}
+-
+-int
+-usb_endpoint_maxp(const struct usb_endpoint_descriptor *epd)
+-{
+-	return (le16_to_cpu(epd->wMaxPacketSize));
+-}
+-
+-int
+-usb_translate_errors(int error_code)
+-{
+-	switch (error_code) {
+-	case 0:
+-	case -ENOMEM:
+-	case -ENODEV:
+-	case -EOPNOTSUPP:
+-		return (error_code);
+-	default:
+-		return (-EIO);
+-	}
+-}
+-
+ #endif
+diff --git a/kernel/generic_usb.c b/kernel/generic_usb.c
+new file mode 100644
+index 0000000..544b099
+--- /dev/null
++++ b/kernel/generic_usb.c
+@@ -0,0 +1,720 @@
++/*-
++ * Copyright (c) 2009-2011 Hans Petter Selasky. All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ */
++
++struct {
++	struct usb_driver *lh_first;
++}	usb_linux_driver_list;
++
++unsigned int
++usb_create_host_endpoint(struct usb_device *dev, uint8_t type, uint8_t ep)
++{
++	return ((type << 30) | ((ep & 0xFF) << 15) |
++	    ((dev->devnum & 0x7F) << 8) | (ep & USB_DIR_IN));
++}
++
++/*------------------------------------------------------------------------*
++ *	usb_altnum_to_altsetting
++ *
++ * The following function returns a pointer to an alternate setting by
++ * index given a "usb_interface" pointer. If the alternate setting by
++ * index does not exist, NULL is returned. And alternate setting is a
++ * variant of an interface, but usually with slightly different
++ * characteristics.
++ *------------------------------------------------------------------------*/
++struct usb_host_interface *
++usb_altnum_to_altsetting(const struct usb_interface *intf, uint8_t alt_index)
++{
++	if (alt_index >= intf->num_altsetting) {
++		return (NULL);
++	}
++	return (intf->altsetting + alt_index);
++}
++
++/*------------------------------------------------------------------------*
++ *	usb_ifnum_to_if
++ *
++ * The following function searches up an USB interface by
++ * "bInterfaceNumber". If no match is found, NULL is returned.
++ *------------------------------------------------------------------------*/
++struct usb_interface *
++usb_ifnum_to_if(struct usb_device *dev, uint8_t iface_no)
++{
++	struct usb_interface *p_ui;
++
++	for (p_ui = dev->bsd_iface_start;
++	    p_ui != dev->bsd_iface_end;
++	    p_ui++) {
++		if ((p_ui->num_altsetting > 0) &&
++		    (p_ui->altsetting->desc.bInterfaceNumber == iface_no)) {
++			return (p_ui);
++		}
++	}
++	return (NULL);
++}
++
++/*------------------------------------------------------------------------*
++ *	usb_buffer_alloc
++ *------------------------------------------------------------------------*/
++void   *
++usb_buffer_alloc(struct usb_device *dev, uint32_t size,
++    uint16_t mem_flags, dma_addr_t *dma_addr)
++{
++	void *ptr;
++
++	if (dma_addr)
++		*dma_addr = 0;
++	ptr = malloc(size);
++	if (ptr)
++		memset(ptr, 0, size);
++	return (ptr);
++}
++
++/*------------------------------------------------------------------------*
++ *	usb_get_intfdata
++ *------------------------------------------------------------------------*/
++void   *
++usb_get_intfdata(struct usb_interface *intf)
++{
++	return (intf->bsd_priv_sc);
++}
++
++/*------------------------------------------------------------------------*
++ *	usb_register
++ *
++ * The following function is used by the "USB_DRIVER_EXPORT()" macro,
++ * and is used to register a Linux USB driver, so that its
++ * "usb_device_id" structures gets searched a probe time. This
++ * function is not part of the Linux USB API, and is for internal use
++ * only.
++ *------------------------------------------------------------------------*/
++int
++usb_register(struct usb_driver *drv)
++{
++	atomic_lock();
++	LIST_INSERT_HEAD(&usb_linux_driver_list, drv, linux_driver_list);
++	atomic_unlock();
++
++	return (0);
++}
++
++/*------------------------------------------------------------------------*
++ *	usb_deregister
++ *
++ * The following function is used by the "USB_DRIVER_EXPORT()" macro,
++ * and is used to deregister a Linux USB driver. This function will
++ * ensure that all driver instances belonging to the Linux USB device
++ * driver in question, gets detached before the driver is
++ * unloaded. This function is not part of the Linux USB API, and is
++ * for internal use only.
++ *------------------------------------------------------------------------*/
++int
++usb_deregister(struct usb_driver *drv)
++{
++	atomic_lock();
++	LIST_REMOVE(drv, linux_driver_list);
++	atomic_unlock();
++
++	return (0);
++}
++
++/*------------------------------------------------------------------------*
++ *	usb_buffer_free
++ *------------------------------------------------------------------------*/
++void
++usb_buffer_free(struct usb_device *dev, uint32_t size,
++    void *addr, dma_addr_t dma_addr)
++{
++	free(addr);
++}
++
++/*------------------------------------------------------------------------*
++ *	usb_alloc_urb
++ *
++ * This function should always be used when you allocate an URB for
++ * use with the USB Linux stack. In case of an isochronous transfer
++ * you must specifiy the maximum number of "iso_packets" which you
++ * plan to transfer per URB. This function is always blocking, and
++ * "mem_flags" are not regarded like on Linux.
++ *------------------------------------------------------------------------*/
++struct urb *
++usb_alloc_urb(uint16_t iso_packets, uint16_t mem_flags)
++{
++	struct urb *urb;
++	uint32_t size;
++
++	size = sizeof(*urb) + (iso_packets * sizeof(urb->iso_frame_desc[0]));
++
++	urb = malloc(size);
++	if (urb) {
++		memset(urb, 0, size);
++		urb->number_of_packets = iso_packets;
++	}
++	return (urb);
++}
++
++/*------------------------------------------------------------------------*
++ *	usb_init_urb
++ *
++ * The following function can be used to initialize a custom URB. It
++ * is not recommended to use this function. Use "usb_alloc_urb()"
++ * instead.
++ *------------------------------------------------------------------------*/
++void
++usb_init_urb(struct urb *urb)
++{
++	if (urb == NULL)
++		return;
++
++	memset(urb, 0, sizeof(*urb));
++}
++
++/*------------------------------------------------------------------------*
++ *	usb_set_intfdata
++ *
++ * The following function sets the per Linux USB interface private
++ * data pointer. It is used by most Linux USB device drivers.
++ *------------------------------------------------------------------------*/
++void
++usb_set_intfdata(struct usb_interface *intf, void *data)
++{
++	intf->bsd_priv_sc = data;
++}
++
++/* The following functions directly derive from Linux: */
++
++int
++usb_endpoint_dir_in(const struct usb_endpoint_descriptor *epd)
++{
++	return ((epd->bEndpointAddress & USB_ENDPOINT_DIR_MASK) == USB_DIR_IN);
++}
++
++int
++usb_endpoint_dir_out(const struct usb_endpoint_descriptor *epd)
++{
++	return ((epd->bEndpointAddress & USB_ENDPOINT_DIR_MASK) == USB_DIR_OUT);
++}
++
++int
++usb_endpoint_xfer_bulk(const struct usb_endpoint_descriptor *epd)
++{
++	return ((epd->bmAttributes & USB_ENDPOINT_XFERTYPE_MASK) == USB_ENDPOINT_XFER_BULK);
++}
++
++int
++usb_endpoint_xfer_control(const struct usb_endpoint_descriptor *epd)
++{
++	return ((epd->bmAttributes & USB_ENDPOINT_XFERTYPE_MASK) == USB_ENDPOINT_XFER_CONTROL);
++}
++
++int
++usb_endpoint_xfer_int(const struct usb_endpoint_descriptor *epd)
++{
++	return ((epd->bmAttributes & USB_ENDPOINT_XFERTYPE_MASK) == USB_ENDPOINT_XFER_INT);
++}
++
++int
++usb_endpoint_xfer_isoc(const struct usb_endpoint_descriptor *epd)
++{
++	return ((epd->bmAttributes & USB_ENDPOINT_XFERTYPE_MASK) == USB_ENDPOINT_XFER_ISOC);
++}
++
++void
++usb_fill_control_urb(struct urb *urb,
++    struct usb_device *dev,
++    unsigned int pipe,
++    unsigned char *setup_packet,
++    void *transfer_buffer,
++    int buffer_length,
++    usb_complete_t complete_fn,
++    void *context)
++{
++	urb->dev = dev;
++	urb->pipe = pipe;
++	urb->setup_packet = setup_packet;
++	urb->transfer_buffer = transfer_buffer;
++	urb->transfer_buffer_length = buffer_length;
++	urb->complete = complete_fn;
++	urb->context = context;
++}
++
++void
++usb_fill_bulk_urb(struct urb *urb,
++    struct usb_device *dev,
++    unsigned int pipe,
++    void *transfer_buffer,
++    int buffer_length,
++    usb_complete_t complete_fn,
++    void *context)
++{
++	urb->dev = dev;
++	urb->pipe = pipe;
++	urb->transfer_buffer = transfer_buffer;
++	urb->transfer_buffer_length = buffer_length;
++	urb->complete = complete_fn;
++	urb->context = context;
++}
++
++void
++usb_fill_int_urb(struct urb *urb,
++    struct usb_device *dev,
++    unsigned int pipe,
++    void *transfer_buffer,
++    int buffer_length,
++    usb_complete_t complete_fn,
++    void *context,
++    int interval)
++{
++	urb->dev = dev;
++	urb->pipe = pipe;
++	urb->transfer_buffer = transfer_buffer;
++	urb->transfer_buffer_length = buffer_length;
++	urb->complete = complete_fn;
++	urb->context = context;
++	if (dev->speed == USB_SPEED_HIGH ||
++	    dev->speed == USB_SPEED_SUPER ||
++	    dev->speed == USB_SPEED_VARIABLE)
++		urb->interval = 1 << (interval - 1);
++	else
++		urb->interval = interval;
++	urb->start_frame = -1;
++}
++
++struct usb_interface *
++usb_get_intf(struct usb_interface *intf)
++{
++	if (intf)
++		get_device(&intf->dev);
++	return intf;
++}
++
++void
++usb_put_intf(struct usb_interface *intf)
++{
++	if (intf)
++		put_device(&intf->dev);
++}
++
++struct usb_device *
++usb_get_dev(struct usb_device *dev)
++{
++	if (dev)
++		get_device(&dev->dev);
++
++	return dev;
++}
++
++void
++usb_put_dev(struct usb_device *dev)
++{
++	if (dev)
++		put_device(&dev->dev);
++}
++
++int
++usb_make_path(struct usb_device *dev, char *buf, size_t size)
++{
++	int actual;
++
++	actual = snprintf(buf, size, "usb-/dev/usb-/dev/usb");
++	return (actual >= (int)size) ? -1 : actual;
++}
++
++struct api_context {
++	struct completion done;
++	int	status;
++};
++
++static void
++usb_api_blocking_completion(struct urb *urb)
++{
++	struct api_context *ctx = urb->context;
++
++	ctx->status = urb->status;
++	complete(&ctx->done);
++}
++
++static int
++usb_start_wait_urb(struct urb *urb, int timeout, int *actual_length)
++{
++	struct api_context ctx;
++	int retval;
++
++	init_completion(&ctx.done);
++	ctx.status = -ECONNRESET;
++
++	urb->context = &ctx;
++	urb->actual_length = 0;
++	urb->timeout = timeout;
++	retval = usb_submit_urb(urb, GFP_NOIO);
++	if (retval == 0) {
++		wait_for_completion(&ctx.done);
++		retval = ctx.status;
++	}
++	if (actual_length)
++		*actual_length = urb->actual_length;
++
++	usb_free_urb(urb);
++	uninit_completion(&ctx.done);
++	return (retval);
++}
++
++int
++usb_bulk_msg(struct usb_device *usb_dev, unsigned int pipe,
++    void *data, int len, int *actual_length, int timeout)
++{
++	struct urb *urb;
++
++	urb = usb_alloc_urb(0, GFP_KERNEL);
++	if (!urb)
++		return (-ENOMEM);
++
++	if (usb_pipetype(pipe) == PIPE_INTERRUPT) {
++		usb_fill_int_urb(urb, usb_dev, pipe, data, len,
++		    usb_api_blocking_completion, NULL, 0);
++	} else {
++		usb_fill_bulk_urb(urb, usb_dev, pipe, data, len,
++		    usb_api_blocking_completion, NULL);
++	}
++
++	return (usb_start_wait_urb(urb, timeout, actual_length));
++}
++
++/* Calling the usb_match_xxx() functions directly is deferred. */
++
++int
++usb_match_device(struct usb_device *dev, const struct usb_device_id *id)
++{
++	int flags = id->match_flags;
++
++	if ((flags & USB_DEVICE_ID_MATCH_VENDOR) &&
++	    (id->idVendor != le16_to_cpu(dev->descriptor.idVendor)))
++		goto no_match;
++
++	if ((flags & USB_DEVICE_ID_MATCH_PRODUCT) &&
++	    (id->idProduct != le16_to_cpu(dev->descriptor.idProduct)))
++		goto no_match;
++
++	if ((flags & USB_DEVICE_ID_MATCH_DEV_LO) &&
++	    (id->bcdDevice_lo > le16_to_cpu(dev->descriptor.bcdDevice)))
++		goto no_match;
++
++	if ((flags & USB_DEVICE_ID_MATCH_DEV_HI) &&
++	    (id->bcdDevice_hi < le16_to_cpu(dev->descriptor.bcdDevice)))
++		goto no_match;
++
++	if ((flags & USB_DEVICE_ID_MATCH_DEV_CLASS) &&
++	    (id->bDeviceClass != dev->descriptor.bDeviceClass))
++		goto no_match;
++
++	if ((flags & USB_DEVICE_ID_MATCH_DEV_SUBCLASS) &&
++	    (id->bDeviceSubClass != dev->descriptor.bDeviceSubClass))
++		goto no_match;
++
++	if ((flags & USB_DEVICE_ID_MATCH_DEV_PROTOCOL) &&
++	    (id->bDeviceProtocol != dev->descriptor.bDeviceProtocol))
++		goto no_match;
++
++	return (1);
++
++no_match:
++	return (0);
++}
++
++int
++usb_match_one_id(struct usb_interface *interface, const struct usb_device_id *id)
++{
++	struct usb_host_interface *intf;
++	struct usb_device *dev;
++
++	if (id == NULL)
++		goto no_match;
++
++	intf = interface->cur_altsetting;
++	dev = interface_to_usbdev(interface);
++
++	if (!usb_match_device(dev, id))
++		goto no_match;
++
++	if ((dev->descriptor.bDeviceClass == USB_CLASS_VENDOR_SPEC) &&
++	    (!(id->match_flags & USB_DEVICE_ID_MATCH_VENDOR)) &&
++	    (id->match_flags & USB_DEVICE_ID_MATCH_INT_INFO))
++		goto no_match;
++
++	if ((id->match_flags & USB_DEVICE_ID_MATCH_INT_CLASS) &&
++	    (id->bInterfaceClass != intf->desc.bInterfaceClass))
++		goto no_match;
++
++	if ((id->match_flags & USB_DEVICE_ID_MATCH_INT_SUBCLASS) &&
++	    (id->bInterfaceSubClass != intf->desc.bInterfaceSubClass))
++		goto no_match;
++
++	if ((id->match_flags & USB_DEVICE_ID_MATCH_INT_PROTOCOL) &&
++	    (id->bInterfaceProtocol != intf->desc.bInterfaceProtocol))
++		goto no_match;
++
++	return (1);
++
++no_match:
++	return (0);
++}
++
++const struct usb_device_id *
++usb_match_id(struct usb_interface *interface, const struct usb_device_id *id)
++{
++	if (id == NULL)
++		goto no_match;
++
++	for (; id->match_flags; id++) {
++		if (usb_match_one_id(interface, id))
++			return (id);
++	}
++
++	/* check for special case */
++	if (id->driver_info != 0)
++		return (id);
++
++no_match:
++	return (NULL);
++}
++
++int
++usb_reset_configuration(struct usb_device *dev)
++{
++	return (-EINVAL);		/* not implemented */
++}
++
++int
++usb_lock_device_for_reset(struct usb_device *udev,
++    const struct usb_interface *iface)
++{
++	return (0);
++}
++
++void
++usb_unlock_device(struct usb_device *udev)
++{
++
++}
++
++int
++usb_reset_device(struct usb_device *dev)
++{
++	return (0);
++}
++
++uint8_t
++usb_pipetype(unsigned int pipe)
++{
++	return ((pipe >> 30) & 3);
++}
++
++int
++usb_autopm_get_interface(struct usb_interface *intf)
++{
++	return (0);
++}
++
++int
++usb_autopm_set_interface(struct usb_interface *intf)
++{
++	return (0);
++}
++
++int
++usb_driver_claim_interface(struct usb_driver *drv,
++    struct usb_interface *intf, void *priv)
++{
++	return (0);
++}
++
++uint16_t
++usb_maxpacket(struct usb_device *dev, int endpoint, int is_out)
++{
++	struct usb_host_endpoint *ep;
++	uint8_t index = (endpoint >> 15) & 15;
++
++	if (is_out) {
++		ep = dev->ep_out[index];
++	} else {
++		ep = dev->ep_in[index];
++	}
++	if (ep == NULL)
++		return (0);
++	return (le16_to_cpu(ep->desc.wMaxPacketSize));
++}
++
++void
++usb_enable_autosuspend(struct usb_device *udev)
++{
++}
++
++int
++__usb_get_extra_descriptor(char *buffer, unsigned size,
++    unsigned char type, void **ptr)
++{
++	struct usb_descriptor_header *header;
++
++	while (size >= sizeof(struct usb_descriptor_header)) {
++		header = (struct usb_descriptor_header *)buffer;
++
++		if (header->bLength < 2)
++			return (-1);
++
++		if (header->bLength < size)
++			return (-1);
++
++		if (header->bDescriptorType == type) {
++			*ptr = header;
++			return (0);
++		}
++		buffer += header->bLength;
++		size -= header->bLength;
++	}
++	return (-1);
++}
++
++int
++usb_endpoint_maxp(const struct usb_endpoint_descriptor *epd)
++{
++	return (le16_to_cpu(epd->wMaxPacketSize));
++}
++
++int
++usb_translate_errors(int error_code)
++{
++	switch (error_code) {
++	case 0:
++	case -ENOMEM:
++	case -ENODEV:
++	case -EOPNOTSUPP:
++		return (error_code);
++	default:
++		return (-EIO);
++	}
++}
++
++/*------------------------------------------------------------------------*
++ *	usb_find_host_endpoint
++ *
++ * The following function will return the Linux USB host endpoint
++ * structure that matches the given endpoint type and endpoint
++ * value. If no match is found, NULL is returned. This function is not
++ * part of the Linux USB API and is only used internally.
++ *------------------------------------------------------------------------*/
++struct usb_host_endpoint *
++usb_find_host_endpoint(struct usb_device *dev, unsigned int pipe)
++{
++	struct usb_host_endpoint *uhe;
++	struct usb_host_endpoint *uhe_end;
++	struct usb_host_interface *uhi;
++	struct usb_interface *ui;
++	uint8_t ea;
++	uint8_t at;
++	uint8_t mask;
++	uint8_t type = (pipe >> 30) & 3;
++	uint8_t ep = (pipe >> 15) & 255;
++
++	if (dev == NULL)
++		return (NULL);
++
++	if (type == USB_ENDPOINT_XFER_CONTROL)
++		mask = USB_ENDPOINT_NUMBER_MASK;
++	else
++		mask = (USB_ENDPOINT_DIR_MASK | USB_ENDPOINT_NUMBER_MASK);
++
++	ep &= mask;
++
++	/*
++	 * Iterate over all the interfaces searching the selected alternate
++	 * setting only, and all belonging endpoints.
++	 */
++	for (ui = dev->bsd_iface_start;
++	    ui != dev->bsd_iface_end;
++	    ui++) {
++		uhi = ui->cur_altsetting;
++		if (uhi) {
++			uhe_end = uhi->endpoint + uhi->desc.bNumEndpoints;
++			for (uhe = uhi->endpoint;
++			    uhe != uhe_end;
++			    uhe++) {
++				ea = uhe->desc.bEndpointAddress;
++				at = uhe->desc.bmAttributes;
++
++				if (((ea & mask) == ep) &&
++				    ((at & USB_ENDPOINT_XFERTYPE_MASK) == type)) {
++					return (uhe);
++				}
++			}
++		}
++	}
++
++	if ((type == USB_ENDPOINT_XFER_CONTROL) &&
++	    ((ep & USB_ENDPOINT_NUMBER_MASK) == 0)) {
++		return (&dev->ep0);
++	}
++	return (NULL);
++}
++
++void
++usb_linux_fill_ep_info(struct usb_device *udev,
++    struct usb_host_interface *uhi)
++{
++	struct usb_host_endpoint *uhe_end;
++	struct usb_host_endpoint *uhe;
++	uint8_t ea;
++
++	uhe_end = uhi->endpoint + uhi->desc.bNumEndpoints;
++
++	for (uhe = uhi->endpoint; uhe != uhe_end; uhe++) {
++
++		ea = uhe->desc.bEndpointAddress;
++
++		/* skip any bogus control endpoints */
++		if ((ea & USB_ENDPOINT_NUMBER_MASK) == 0)
++			continue;
++
++		if (ea & USB_ENDPOINT_DIR_MASK)
++			udev->ep_in[ea & 15] = uhe;
++		else
++			udev->ep_out[ea & 15] = uhe;
++	}
++}
++
++char *
++usb_string_dup(struct usb_device *udev, uint8_t string_id)
++{
++	char buf[80];
++	int size;
++
++	if (string_id == 0)
++		return (strdup(""));
++
++	if ((size = usb_string(udev, string_id,
++	    buf, sizeof(buf) - 1)) > 0) {
++		buf[size] = '\0';
++		return (strdup(buf));
++	}
++	return (strdup(""));
++}
+diff --git a/kernel/linux_start_section.c b/kernel/linux_start_section.c
+index a22c254..da51fc0 100644
+--- a/kernel/linux_start_section.c
++++ b/kernel/linux_start_section.c
+@@ -69,6 +69,10 @@ linux_init(void)
+ 		t->func();
+ 		t++;
+ 	}
++
++#ifdef __APPLE__
++	usb_init();
++#endif
+ }
+ 
+ void
+@@ -86,4 +90,8 @@ linux_exit(void)
+ 		t->func();
+ 		t++;
+ 	}
++
++#ifdef __APPLE__
++	usb_exit();
++#endif
+ }
+diff --git a/kernel/linux_usb.h b/kernel/linux_usb.h
+index f674d29..90d7623 100644
+--- a/kernel/linux_usb.h
++++ b/kernel/linux_usb.h
+@@ -473,8 +473,6 @@ struct usb_host_endpoint {
+ 
+ #ifndef __APPLE__
+ 	struct libusb20_transfer *bsd_xfer[2];
+-#else
+-	struct libusb_transfer *bsd_xfer[2];
+ #endif
+ 
+ 	uint8_t *extra;			/* Extra descriptors */
+@@ -541,6 +539,8 @@ struct usb_device {
+ 
+ #ifndef __APPLE__
+ 	struct libusb20_device *bsd_udev;
++#else
++	libusb_device_handle *libusb_handle;
+ #endif
+ 	struct usb_interface *bsd_iface_start;
+ 	struct usb_interface *bsd_iface_end;
+@@ -613,12 +613,20 @@ struct urb {
+ 	uint16_t interval;		/* (modify) transfer interval
+ 					 * (INT/ISO) */
+ 	uint16_t error_count;		/* (return) number of ISO errors */
++#ifndef __APPLE__
+ 	int16_t	status;			/* (return) status */
++#else
++	volatile int16_t status;
++#endif
+ 
+ 	uint8_t	setup_dma;		/* (in) not used on FreeBSD */
+ 	dma_addr_t transfer_dma;	/* (in) not used on FreeBSD */
+ 	uint8_t	bsd_no_resubmit;	/* (internal) FreeBSD specific */
+ 
++#ifdef __APPLE__
++	struct libusb_transfer *libusb_transfer;
++#endif
++
+ 	struct usb_iso_packet_descriptor iso_frame_desc[];	/* (in) ISO ONLY */
+ };
+ 
+@@ -789,4 +797,13 @@ int	usb_endpoint_maxp(const struct usb_endpoint_descriptor *);
+ #define	usb_free_coherent(...) usb_buffer_free(__VA_ARGS__)
+ #define	usb_debug_root NULL
+ 
++struct usb_host_endpoint *usb_find_host_endpoint(struct usb_device *dev, unsigned int pipe);
++void usb_linux_fill_ep_info(struct usb_device *udev, struct usb_host_interface *uhi);
++char *usb_string_dup(struct usb_device *udev, uint8_t string_id);
++
++#ifdef __APPLE__
++void usb_init(void);
++void usb_exit(void);
++#endif
++
+ #endif					/* _LINUX_USB_H_ */
+diff --git a/kernel/macos_usb.c b/kernel/macos_usb.c
+new file mode 100644
+index 0000000..7f57011
+--- /dev/null
++++ b/kernel/macos_usb.c
+@@ -0,0 +1,796 @@
++/*-
++ * Copyright (c) 2009-2011 Hans Petter Selasky, 2014 Jan Hauffa. All rights
++ * reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ */
++
++#ifdef __APPLE__
++
++#define USB_TRANSFER_PENDING 1
++
++extern struct {
++	struct usb_driver *lh_first;
++}	usb_linux_driver_list;
++
++static struct libusb_context *usb_ctx;
++static pthread_t event_thread;
++static volatile int event_thread_run = 1;
++static libusb_hotplug_callback_handle usb_hotplug_cb_handle;
++
++static struct usb_device *uls[16];
++static struct device usb_dummy_bus;
++
++static void *
++usb_event_thread_func(void *ctx)
++{
++    while (event_thread_run) {
++        libusb_handle_events(ctx);
++    }
++    return (NULL);
++}
++
++static const struct usb_device_id *
++usb_linux_lookup_id(
++    const struct libusb_device_descriptor *pdd,
++    const struct libusb_interface_descriptor *pid,
++    const struct usb_device_id *id)
++{
++	if (id == NULL) {
++		goto done;
++	}
++	/*
++	 * Keep on matching array entries until we find one with
++	 * "match_flags" equal to zero, which indicates the end of the
++	 * array:
++	 */
++	for (; id->match_flags; id++) {
++
++		if ((id->match_flags & USB_DEVICE_ID_MATCH_VENDOR) &&
++		    (id->idVendor != pdd->idVendor)) {
++			continue;
++		}
++		if ((id->match_flags & USB_DEVICE_ID_MATCH_PRODUCT) &&
++		    (id->idProduct != pdd->idProduct)) {
++			continue;
++		}
++		if ((id->match_flags & USB_DEVICE_ID_MATCH_DEV_LO) &&
++		    (id->bcdDevice_lo > pdd->bcdDevice)) {
++			continue;
++		}
++		if ((id->match_flags & USB_DEVICE_ID_MATCH_DEV_HI) &&
++		    (id->bcdDevice_hi < pdd->bcdDevice)) {
++			continue;
++		}
++		if ((id->match_flags & USB_DEVICE_ID_MATCH_DEV_CLASS) &&
++		    (id->bDeviceClass != pdd->bDeviceClass)) {
++			continue;
++		}
++		if ((id->match_flags & USB_DEVICE_ID_MATCH_DEV_SUBCLASS) &&
++		    (id->bDeviceSubClass != pdd->bDeviceSubClass)) {
++			continue;
++		}
++		if ((id->match_flags & USB_DEVICE_ID_MATCH_DEV_PROTOCOL) &&
++		    (id->bDeviceProtocol != pdd->bDeviceProtocol)) {
++			continue;
++		}
++		if ((pdd->bDeviceClass == 0xFF) &&
++		    (!(id->match_flags & USB_DEVICE_ID_MATCH_VENDOR)) &&
++		    (id->match_flags & USB_DEVICE_ID_MATCH_INT_INFO)) {
++			continue;
++		}
++		if ((id->match_flags & USB_DEVICE_ID_MATCH_INT_CLASS) &&
++		    (id->bInterfaceClass != pid->bInterfaceClass)) {
++			continue;
++		}
++		if ((id->match_flags & USB_DEVICE_ID_MATCH_INT_SUBCLASS) &&
++		    (id->bInterfaceSubClass != pid->bInterfaceSubClass)) {
++			continue;
++		}
++		if ((id->match_flags & USB_DEVICE_ID_MATCH_INT_PROTOCOL) &&
++		    (id->bInterfaceProtocol != pid->bInterfaceProtocol)) {
++			continue;
++		}
++		/* we found a match! */
++		return (id);
++	}
++
++done:
++	return (NULL);
++}
++
++static void
++usb_copy_device_descriptor(struct usb_device_descriptor *to,
++    const struct libusb_device_descriptor *from) {
++    to->bLength = from->bLength;
++	to->bDescriptorType = from->bDescriptorType;
++	to->bcdUSB = from->bcdUSB;
++	to->bDeviceClass = from->bDeviceClass;
++	to->bDeviceSubClass = from->bDeviceSubClass;
++	to->bDeviceProtocol = from->bDeviceProtocol;
++	to->bMaxPacketSize0 = from->bMaxPacketSize0;
++	to->idVendor = from->idVendor;
++	to->idProduct = from->idProduct;
++	to->bcdDevice = from->bcdDevice;
++	to->iManufacturer = from->iManufacturer;
++	to->iProduct = from->iProduct;
++	to->iSerialNumber = from->iSerialNumber;
++	to->bNumConfigurations = from->bNumConfigurations;
++}
++
++static void
++usb_copy_config_descriptor(struct usb_config_descriptor *to,
++    const struct libusb_config_descriptor *from) {
++    to->bLength = from->bLength;
++	to->bDescriptorType = from->bDescriptorType;
++	to->wTotalLength = from->wTotalLength;
++	to->bNumInterfaces = from->bNumInterfaces;
++	to->bConfigurationValue = from->bConfigurationValue;
++	to->iConfiguration = from->iConfiguration;
++	to->bmAttributes = from->bmAttributes;
++	to->bMaxPower = from->MaxPower;
++}
++
++static void
++usb_copy_interface_descriptor(struct usb_interface_descriptor *to,
++    const struct libusb_interface_descriptor *from) {
++    to->bLength = from->bLength;
++	to->bDescriptorType = from->bDescriptorType;
++	to->bInterfaceNumber = from->bInterfaceNumber;
++	to->bAlternateSetting = from->bAlternateSetting;
++	to->bNumEndpoints = from->bNumEndpoints;
++	to->bInterfaceClass = from->bInterfaceClass;
++	to->bInterfaceSubClass = from->bInterfaceSubClass;
++	to->bInterfaceProtocol = from->bInterfaceProtocol;
++	to->iInterface = from->iInterface;
++}
++
++static void
++usb_copy_endpoint_descriptor(struct usb_endpoint_descriptor *to,
++    const struct libusb_endpoint_descriptor *from) {
++	to->bLength = from->bLength;
++	to->bDescriptorType = from->bDescriptorType;
++	to->bEndpointAddress = from->bEndpointAddress;
++	to->bmAttributes = from->bmAttributes;
++	to->wMaxPacketSize = from->wMaxPacketSize;
++	to->bInterval = from->bInterval;
++	to->bRefresh = from->bRefresh;
++	to->bSynchAddress = from->bSynchAddress;
++}
++
++static void
++usb_copy_endpoint_companion_descriptor(struct usb_ss_ep_comp_descriptor *to,
++    const struct libusb_ss_endpoint_companion_descriptor *from) {
++	to->bLength = from->bLength;
++	to->bDescriptorType = from->bDescriptorType;
++	to->bMaxBurst = from->bMaxBurst;
++	to->bmAttributes = from->bmAttributes;
++	to->wBytesPerInterval = from->wBytesPerInterval;
++}
++
++static struct usb_device *
++usb_linux_create_usb_device(struct libusb_device *udev,
++    const struct libusb_config_descriptor *pcfg,
++    const struct libusb_device_descriptor *desc)
++{
++	const struct libusb_interface *iface;
++	const struct libusb_interface_descriptor *id;
++	const struct libusb_interface_descriptor *aid;
++	const struct libusb_endpoint_descriptor *ed;
++	struct usb_device *p_ud = NULL;
++	struct usb_interface *p_ui = NULL;
++	struct usb_host_interface *p_uhi = NULL;
++	struct usb_host_endpoint *p_uhe = NULL;
++	uint32_t size;
++	uint16_t niface_total;
++	uint16_t nedesc;
++	uint16_t iface_index;
++	uint8_t i;
++	uint8_t j;
++	uint8_t k;
++	uint8_t num_config_iface;
++
++	/*
++	 * We do two passes. One pass for computing necessary memory size
++	 * and one pass to initialize all the allocated memory structures.
++	 */
++	nedesc = 0;
++	iface_index = 0;
++	niface_total = 0;
++	num_config_iface = pcfg->bNumInterfaces;
++	if (num_config_iface > USB_LINUX_IFACE_MAX)
++		num_config_iface = USB_LINUX_IFACE_MAX;
++
++	for (i = 0; i != num_config_iface; i++) {
++		iface = pcfg->interface + i;
++		id = iface->altsetting + 0;	/* TODO: correct? */
++		iface_index++;
++		niface_total++;
++		nedesc += id->bNumEndpoints;
++		for (j = 1; j != iface->num_altsetting; j++) {
++			aid = iface->altsetting + j;
++			nedesc += aid->bNumEndpoints;
++			niface_total++;
++		}
++	}
++
++	size = ((sizeof(*p_ud) * 1) +
++	    (sizeof(*p_uhe) * nedesc) +
++	    (sizeof(*p_ui) * iface_index) +
++	    (sizeof(*p_uhi) * niface_total));
++
++	p_ud = calloc(1, size);
++	if (p_ud == NULL)
++		return (NULL);
++
++	if (libusb_open(udev, &p_ud->libusb_handle) < 0) {
++		free(p_ud);
++		return (NULL);
++	}	
++
++	p_uhe = (void *)(p_ud + 1);
++	p_ui = (void *)(p_uhe + nedesc);
++	p_uhi = (void *)(p_ui + iface_index);
++
++	p_ud->bus = &usb_dummy_bus;
++
++	switch (libusb_get_device_speed(udev)) {
++	case LIBUSB_SPEED_LOW:
++		p_ud->speed = USB_SPEED_LOW;
++		p_ud->ep0.desc.wMaxPacketSize = cpu_to_le16(8);
++		break;
++	case LIBUSB_SPEED_FULL:
++		p_ud->speed = USB_SPEED_FULL;
++		switch (desc->bMaxPacketSize0) {
++		case 8:
++			p_ud->ep0.desc.wMaxPacketSize = cpu_to_le16(8);
++			break;
++		case 16:
++			p_ud->ep0.desc.wMaxPacketSize = cpu_to_le16(16);
++			break;
++		case 32:
++			p_ud->ep0.desc.wMaxPacketSize = cpu_to_le16(32);
++			break;
++		default:
++			p_ud->ep0.desc.wMaxPacketSize = cpu_to_le16(64);
++			break;
++		}
++		break;
++	case LIBUSB_SPEED_HIGH:
++		p_ud->speed = USB_SPEED_HIGH;
++		p_ud->ep0.desc.wMaxPacketSize = cpu_to_le16(64);
++		break;
++	case LIBUSB_SPEED_SUPER:
++		p_ud->speed = USB_SPEED_SUPER;
++		p_ud->ep0.desc.wMaxPacketSize = cpu_to_le16(512);
++		break;
++	default:	/* TODO: map LIBUSB_SPEED_UNKNOWN to USB_SPEED_VARIABLE? */
++		p_ud->speed = USB_SPEED_HIGH;
++		break;
++	}
++
++	p_ud->bsd_iface_start = p_ui;
++	p_ud->bsd_iface_end = p_ui + iface_index;
++	p_ud->bsd_endpoint_start = p_uhe;
++	p_ud->bsd_endpoint_end = p_uhe + nedesc;
++	p_ud->devnum = libusb_get_device_address(udev);
++	p_ud->config = &p_ud->bsd_config;
++	p_ud->actconfig = &p_ud->bsd_config;
++
++	p_ud->ep0.desc.bLength = 7;
++	p_ud->ep0.desc.bDescriptorType = 5;	/* endpoint descriptor */
++	p_ud->ep0.desc.bEndpointAddress = 0;
++	p_ud->ep0.desc.bmAttributes = USB_ENDPOINT_XFER_CONTROL;
++
++	p_ud->ep_in[0] = &p_ud->ep0;
++	p_ud->ep_out[0] = &p_ud->ep0;
++
++	usb_copy_device_descriptor(&p_ud->descriptor, desc);
++	usb_copy_config_descriptor(&p_ud->bsd_config.desc, pcfg);
++
++	/* make sure number of interfaces value is correct */
++	p_ud->bsd_config.desc.bNumInterfaces = num_config_iface;
++
++	for (i = 0; i != num_config_iface; i++) {
++		iface = pcfg->interface + i;
++
++		/* TODO: only claim single interface? */
++		if (libusb_claim_interface(p_ud->libusb_handle,
++		        iface->altsetting[0].bInterfaceNumber) < 0) {
++		    free(p_ud);
++		    return (NULL);
++		}
++
++		p_ud->bsd_config.interface[i] = p_ui;
++		p_ui->dev.driver_static.name = "webcamd";
++		p_ui->dev.driver = &p_ui->dev.driver_static;
++		p_ui->altsetting = p_uhi;
++		p_ui->cur_altsetting = p_uhi;
++		p_ui->num_altsetting = iface->num_altsetting;
++		p_ui->bsd_iface_index = i;
++		p_ui->linux_udev = p_ud;
++
++		for (j = 0; j != p_ui->num_altsetting; j++) {
++			id = iface->altsetting + j;
++			usb_copy_interface_descriptor(&p_uhi->desc, id);
++
++			p_uhi->desc.bNumEndpoints = id->bNumEndpoints;
++			p_uhi->endpoint = p_uhe;
++			p_uhi->string = "";
++			p_uhi->bsd_iface_index = iface_index;
++			p_uhi->extra = (uint8_t *) id->extra;
++			p_uhi->extralen = id->extra_length;
++			p_uhi++;
++
++			for (k = 0; k != id->bNumEndpoints; k++) {
++				struct libusb_ss_endpoint_companion_descriptor *pcomp;
++
++				ed = id->endpoint + k;
++				usb_copy_endpoint_descriptor(&p_uhe->desc, ed);
++
++				/* Look for SuperSpeed endpoint companion descriptor */
++				if (libusb_get_ss_endpoint_companion_descriptor(usb_ctx, ed,
++				        &pcomp) == 0) {
++					usb_copy_endpoint_companion_descriptor(&p_uhe->ss_ep_comp,
++					    pcomp);
++				}
++
++				p_uhe->bsd_iface_index = i;
++				p_uhe->extra = (uint8_t *) ed->extra;
++				p_uhe->extralen = ed->extra_length;
++				p_uhe++;
++			}
++		}
++
++		usb_linux_fill_ep_info(p_ud, p_ui->cur_altsetting);
++		p_ui++;
++	}
++
++	p_ud->dev.driver_static.name = "webcamd";
++	p_ud->dev.driver = &p_ud->dev.driver_static;
++
++	get_device(&p_ud->dev);		/* make sure we don't get freed */
++
++	p_ud->product = usb_string_dup(p_ud, p_ud->descriptor.iProduct);
++	p_ud->manufacturer = usb_string_dup(p_ud, p_ud->descriptor.iManufacturer);
++	p_ud->serial = usb_string_dup(p_ud, p_ud->descriptor.iSerialNumber);
++
++	return (p_ud);
++}
++
++static void
++usb_linux_free_usb_device(struct usb_device *p_dev)
++{
++	struct usb_interface *p_ui;
++	for (p_ui = p_dev->bsd_iface_start; p_ui != p_dev->bsd_iface_end; p_ui++) {
++		libusb_release_interface(p_dev->libusb_handle,
++		    p_ui->cur_altsetting->desc.bInterfaceNumber);		
++	}
++	libusb_close(p_dev->libusb_handle);
++
++	free(p_dev->product);
++	free(p_dev->manufacturer);
++	free(p_dev->serial);
++	free(p_dev);
++}
++
++static int
++usb_hotplug_callback(libusb_context *ctx, libusb_device *dev,
++    libusb_hotplug_event event, void *user_data)
++{
++	if (event == LIBUSB_HOTPLUG_EVENT_DEVICE_ARRIVED) {
++		struct libusb_device_descriptor desc;
++		struct libusb_config_descriptor *pcfg;
++		int devidx, i;
++
++		/* get first free entry in uls; keeps track of open devices */
++		for (devidx = 0;; devidx++) {
++			if (devidx == ARRAY_SIZE(uls))
++				return (0);
++			if (uls[devidx] == NULL)
++				break;
++		}
++
++		libusb_get_device_descriptor(dev, &desc);
++		if (libusb_get_active_config_descriptor(dev, &pcfg) < 0) {
++			/* TODO: device unconfigured if LIBUSB_ERROR_NOT_FOUND; handle? */
++			return (0);
++		}
++
++		for (i = 0; i != pcfg->bNumInterfaces; i++) {
++			struct usb_driver *udrv;
++			/* TODO: possible to detect current altsetting without reset? */
++			const struct libusb_interface_descriptor *pifc =
++			    pcfg->interface[i].altsetting;
++
++			/*
++			 * Skip the FreeBSD USB root HUBs due to false
++			 * detection by some V4L drivers.
++			 */
++			if (pifc->bInterfaceClass == USB_CLASS_HUB)
++				continue;
++
++			LIST_FOREACH(udrv, &usb_linux_driver_list, linux_driver_list) {
++				const struct usb_device_id *id =
++				    usb_linux_lookup_id(&desc, pifc, udrv->id_table);
++				if (id != NULL) {
++					struct usb_interface *ui;
++					struct usb_device *p_dev =
++					    usb_linux_create_usb_device(dev, pcfg, &desc);
++					if (p_dev == NULL) {
++						goto done;
++					}
++
++					ui = p_dev->bsd_iface_start + i;
++					if (udrv->probe(ui, id) == 0) {
++						/* device detected, matched, and accepted by driver */
++						uls[devidx] = p_dev;
++						goto done;
++					} else {
++						usb_linux_free_usb_device(p_dev);
++					}
++				}
++			}
++		}
++done:
++		libusb_free_config_descriptor(pcfg);
++	} else if (event == LIBUSB_HOTPLUG_EVENT_DEVICE_LEFT) {
++		int i;
++		for (i = 0; i < ARRAY_SIZE(uls); i++) {
++			if ((uls[i] != NULL) &&
++			    (libusb_get_device(uls[i]->libusb_handle) == dev)) {
++			    usb_linux_free_usb_device(uls[i]);
++			    uls[i] = NULL;	/* mark for reuse */
++			}
++		}
++	}
++	return (0);
++}
++
++void
++usb_init(void)
++{
++	libusb_init(&usb_ctx);
++	pthread_create(&event_thread, NULL, usb_event_thread_func, usb_ctx);
++	libusb_hotplug_register_callback(usb_ctx,
++	    LIBUSB_HOTPLUG_EVENT_DEVICE_ARRIVED | LIBUSB_HOTPLUG_EVENT_DEVICE_LEFT,
++	    LIBUSB_HOTPLUG_ENUMERATE, LIBUSB_HOTPLUG_MATCH_ANY,
++	    LIBUSB_HOTPLUG_MATCH_ANY, LIBUSB_HOTPLUG_MATCH_ANY,
++	    usb_hotplug_callback, NULL, &usb_hotplug_cb_handle);
++}
++
++void
++usb_exit(void)
++{ 
++	/* close all open devices */
++	int i;
++	for (i = 0; i < ARRAY_SIZE(uls); i++) {
++		if (uls[i] != NULL) {
++			usb_linux_free_usb_device(uls[i]);
++		}
++	}
++
++	/* terminate the event thread */
++    event_thread_run = 0;
++    /* libusb_exit would automatically deregister the callback, but explicit
++       deregistration has the side effect of waking up the event thread. */
++    libusb_hotplug_deregister_callback(usb_ctx, usb_hotplug_cb_handle);
++    pthread_join(event_thread, NULL);
++
++    libusb_exit(usb_ctx);
++}
++
++void
++usb_free_urb(struct urb *urb)
++{
++	if (urb == NULL) {
++		return;
++	}
++
++	if (urb->libusb_transfer != NULL) {
++		libusb_free_transfer(urb->libusb_transfer);
++	}
++	if (urb->transfer_flags & URB_FREE_BUFFER) {
++		free(urb->transfer_buffer);
++	}
++	free(urb);
++}
++
++/* TODO: review error code mapping */
++static int16_t
++usb_map_transfer_status(enum libusb_transfer_status status)
++{
++	switch (status) {
++	case LIBUSB_TRANSFER_COMPLETED:
++		return 0;
++	case LIBUSB_TRANSFER_ERROR:
++		return (-EREMOTEIO);
++	case LIBUSB_TRANSFER_CANCELLED:
++		return (-ECONNRESET);
++	case LIBUSB_TRANSFER_NO_DEVICE:
++		return (-ENODEV);
++	case LIBUSB_TRANSFER_OVERFLOW:
++		return (-EFBIG);
++	case LIBUSB_TRANSFER_STALL:
++	case LIBUSB_TRANSFER_TIMED_OUT:	/* TODO: ignore for iso? */
++	default:
++		return (-EPIPE);
++	}
++}
++
++static void
++usb_transfer_callback(struct libusb_transfer *transfer)
++{
++	struct urb *urb = (struct urb *) transfer->user_data;
++	int i;
++
++	urb->status = usb_map_transfer_status(transfer->status);
++	urb->actual_length = transfer->actual_length;
++	for (i = 0; i < transfer->num_iso_packets; i++) {
++		urb->iso_frame_desc[i].status =
++		    usb_map_transfer_status(transfer->iso_packet_desc[i].status);
++		urb->iso_frame_desc[i].actual_length =
++		    transfer->iso_packet_desc[i].actual_length;
++	}
++
++	urb->bsd_no_resubmit = 1;
++	if (urb->complete) {
++		(urb->complete) (urb);
++	}
++	urb->bsd_no_resubmit = 0;
++}
++
++int
++usb_submit_urb(struct urb *urb, uint16_t mem_flags)
++{
++	struct usb_host_endpoint *uhe;
++	int err, i;
++	uint8_t type, addr;
++	uint32_t expected_offset;
++
++	if (urb == NULL) {
++		return (-EINVAL);
++	}
++
++	atomic_lock();
++	uhe = usb_find_host_endpoint(urb->dev, urb->pipe);
++	atomic_unlock();
++	if (uhe == NULL) {
++		return (-EINVAL);
++	}
++	type = (uhe->desc.bmAttributes & USB_ENDPOINT_XFERTYPE_MASK);
++	addr = (uhe->desc.bEndpointAddress & USB_ENDPOINT_NUMBER_MASK);
++
++	if (urb->bsd_no_resubmit == 0) {
++		if (urb->libusb_transfer == NULL) {
++			urb->libusb_transfer =
++			    libusb_alloc_transfer(urb->number_of_packets);
++			if (urb->libusb_transfer == NULL) {
++				return (-ENOMEM);
++			}
++		}
++		urb->status = USB_TRANSFER_PENDING;
++
++		urb->libusb_transfer->dev_handle = urb->dev->libusb_handle;
++		urb->libusb_transfer->flags = 0;
++		if (urb->transfer_flags & URB_SHORT_NOT_OK) {
++			urb->libusb_transfer->flags |= LIBUSB_TRANSFER_SHORT_NOT_OK;
++		}
++		/* TODO: might need to emulate this */
++		if (urb->transfer_flags & URB_ZERO_PACKET) {
++			urb->libusb_transfer->flags |= LIBUSB_TRANSFER_ADD_ZERO_PACKET;
++		}
++		urb->libusb_transfer->endpoint = addr;
++		urb->libusb_transfer->type = type;
++		if ((type == USB_ENDPOINT_XFER_ISOC) && (urb->timeout == 0)) {
++			urb->libusb_transfer->timeout = 250;
++		} else {
++			urb->libusb_transfer->timeout = urb->timeout;
++		}
++		urb->libusb_transfer->length = urb->transfer_buffer_length;
++		urb->libusb_transfer->callback = usb_transfer_callback;
++		urb->libusb_transfer->user_data = urb;
++		urb->libusb_transfer->buffer = urb->transfer_buffer;
++		urb->libusb_transfer->num_iso_packets = urb->number_of_packets;
++
++		expected_offset = 0;
++		for (i = 0; i < urb->number_of_packets; i++) {
++			if (urb->iso_frame_desc[i].offset != expected_offset) {
++				return (-EINVAL);
++			}
++			expected_offset += urb->iso_frame_desc[i].length;
++			urb->libusb_transfer->iso_packet_desc[i].length =
++			    urb->iso_frame_desc[i].length;
++		}
++
++		err = libusb_submit_transfer(urb->libusb_transfer);
++		if (err < 0) {
++			switch (err) {
++			case LIBUSB_ERROR_NO_DEVICE:
++				return (-ENODEV);
++			case LIBUSB_ERROR_BUSY:
++				return (-EINPROGRESS);
++			default:
++				return (-EINVAL);
++			}
++		}
++	}
++
++	return (0);
++}
++
++int
++usb_unlink_urb(struct urb *urb)
++{
++	int err;
++
++	if (urb->libusb_transfer == NULL) {
++		return (-EINVAL);
++	}
++
++	err = libusb_cancel_transfer(urb->libusb_transfer);
++	if (err < 0) {
++		return (-EINVAL);
++	}
++	return (-EINPROGRESS);	/* success */
++}
++
++void
++usb_kill_urb(struct urb *urb)
++{
++	uint32_t drops;
++
++	if (usb_unlink_urb(urb) != -EINPROGRESS) {
++		/* TODO: condition variable? */
++		while (urb->status == USB_TRANSFER_PENDING) {
++			atomic_lock();
++			drops = atomic_drop();
++			atomic_unlock();
++
++			usleep(10000);
++
++			atomic_lock();
++			atomic_pickup(drops);
++			atomic_unlock();
++		}
++	}
++}
++
++int
++usb_clear_halt(struct usb_device *dev, unsigned int pipe)
++{
++	struct usb_host_endpoint *uhe;
++	int err;
++
++	atomic_lock();	/* TODO: review lock use (callbacks from event thread) */
++	uhe = usb_find_host_endpoint(dev, pipe);
++	atomic_unlock();
++	if (uhe == NULL) {
++		return (-EINVAL);
++	}
++
++	err = libusb_clear_halt(dev->libusb_handle,
++		    (uhe->desc.bEndpointAddress & USB_ENDPOINT_NUMBER_MASK));
++	if (err < 0) {
++		switch (err) {
++		case LIBUSB_ERROR_NO_DEVICE:
++			return (-ENODEV);
++		default:
++			return (-EINVAL);
++		}
++	}
++	return (0);
++}
++
++uint16_t
++usb_get_current_frame_number(struct usb_device *dev)
++{
++	/* TODO: fake this by getting timestamp in callback? */
++	return (0);	/* libusb-1.0 does not provide this information */
++}
++
++int
++usb_set_interface(struct usb_device *dev, uint8_t iface_no, uint8_t alt_index)
++{
++	struct usb_interface *p_ui;
++	int err;
++
++	p_ui = usb_ifnum_to_if(dev, iface_no);
++	if (p_ui == NULL) {
++		return (-EINVAL);
++	}
++
++	err = libusb_set_interface_alt_setting(dev->libusb_handle, iface_no,
++	    alt_index);
++	if (err == 0) {
++		p_ui->cur_altsetting = p_ui->altsetting + alt_index;
++		usb_linux_fill_ep_info(dev, p_ui->cur_altsetting);
++	} else {
++		switch (err) {
++		case LIBUSB_ERROR_NO_DEVICE:
++			return (-ENODEV);
++		default:
++			return (-EINVAL);
++		}
++	}
++	return (0);
++}
++
++int
++usb_control_msg(struct usb_device *dev, unsigned int pipe,
++    uint8_t request, uint8_t requesttype,
++    uint16_t value, uint16_t wIndex, void *data,
++    uint16_t size, uint32_t timeout)
++{
++	struct usb_host_endpoint *uhe;
++	int err;
++	uint8_t type, addr;
++
++	atomic_lock();
++	uhe = usb_find_host_endpoint(dev, pipe);
++	atomic_unlock();
++	if (uhe == NULL) {
++		return (-EINVAL);
++	}
++	type = (uhe->desc.bmAttributes & USB_ENDPOINT_XFERTYPE_MASK);
++	addr = (uhe->desc.bEndpointAddress & USB_ENDPOINT_NUMBER_MASK);
++	/* TODO: check if any caller sends control messages to addr > 0 */
++	if ((type != USB_ENDPOINT_XFER_CONTROL) || (addr != 0)) {
++		return (-EINVAL);
++	}
++
++	err = libusb_control_transfer(dev->libusb_handle, requesttype, request,
++	    value, wIndex, data, size, timeout);
++	if (err < 0) {
++		switch (err) {
++		case LIBUSB_ERROR_TIMEOUT:
++			return (-ETIMEDOUT);
++		case LIBUSB_ERROR_PIPE:
++			return (-ENOENT);
++		case LIBUSB_ERROR_NO_DEVICE:
++			return (-ENODEV);
++		default:
++			return (-EINVAL);
++		}
++	}
++	return (err);
++}
++
++int
++usb_string(struct usb_device *dev, int index, char *buf, size_t size)
++{
++	int err;
++
++	if (size == 0)
++		return (0);
++
++	/* TODO: call libusb_get_string_descriptor and convert to UTF8? */
++	err = libusb_get_string_descriptor_ascii(dev->libusb_handle, index, buf,
++	    size);
++	if (err < 0) {
++		*buf = 0;
++		return (-EINVAL);
++	}
++	return (err);
++}
++
++#endif
+-- 
+2.15.2 (Apple Git-101.1)
+

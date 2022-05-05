@@ -1,0 +1,44 @@
+From 6100cfe2b47918de01a8bf28b821f3cffbdad8ce Mon Sep 17 00:00:00 2001
+From: Jan Hauffa <jhauffa@gmail.com>
+Date: Tue, 14 Jan 2014 18:30:50 +0100
+Subject: [PATCH 10/16] add some constants for device enumeration to public
+ header
+
+---
+ api/webcamd.h | 20 ++++++++++++++++++++
+ 1 file changed, 20 insertions(+)
+
+diff --git a/api/webcamd.h b/api/webcamd.h
+index 32cca68..857c41f 100644
+--- a/api/webcamd.h
++++ b/api/webcamd.h
+@@ -4,6 +4,26 @@
+ #include <stdint.h>
+ #include <sys/types.h>
+ 
++#define	F_V4B_SUBDEV_MAX 	8
++#define	F_V4B_SUBSUBDEV_MAX 	4
++#define F_V4B_MKDEV(devclass,subdev,subsubdev)	(devclass*F_V4B_SUBDEV_MAX*F_V4B_SUBSUBDEV_MAX + subdev*F_V4B_SUBSUBDEV_MAX + subsubdev)
++
++enum {
++	F_V4B_VIDEO,
++	F_V4B_DVB_AUDIO,
++	F_V4B_DVB_CA,
++	F_V4B_DVB_DEMUX,
++	F_V4B_DVB_DVR,
++	F_V4B_DVB_FRONTEND,
++	F_V4B_DVB_OSD,
++	F_V4B_DVB_SEC,
++	F_V4B_DVB_VIDEO,
++	F_V4B_LIRC,
++	F_V4B_EVDEV,
++	F_V4B_JOYDEV,
++	F_V4B_MAX,
++};
++
+ struct cdev_handle;
+ 
+ struct cdev_handle *linux_open(int f_v4b, int fflags);
+-- 
+2.15.2 (Apple Git-101.1)
+

@@ -1,0 +1,57 @@
+From 4a011fea758e112745969d89d4395682daabac5f Mon Sep 17 00:00:00 2001
+From: Jan Hauffa <jhauffa@gmail.com>
+Date: Sun, 19 Jan 2014 23:14:21 +0100
+Subject: [PATCH 13/16] fix computation of USB endpoint address
+
+---
+ kernel/macos_usb.c | 13 ++++++-------
+ 1 file changed, 6 insertions(+), 7 deletions(-)
+
+diff --git a/kernel/macos_usb.c b/kernel/macos_usb.c
+index 7f57011..a1f7749 100644
+--- a/kernel/macos_usb.c
++++ b/kernel/macos_usb.c
+@@ -578,7 +578,7 @@ usb_submit_urb(struct urb *urb, uint16_t mem_flags)
+ 		return (-EINVAL);
+ 	}
+ 	type = (uhe->desc.bmAttributes & USB_ENDPOINT_XFERTYPE_MASK);
+-	addr = (uhe->desc.bEndpointAddress & USB_ENDPOINT_NUMBER_MASK);
++	addr = uhe->desc.bEndpointAddress;
+ 
+ 	if (urb->bsd_no_resubmit == 0) {
+ 		if (urb->libusb_transfer == NULL) {
+@@ -688,8 +688,7 @@ usb_clear_halt(struct usb_device *dev, unsigned int pipe)
+ 		return (-EINVAL);
+ 	}
+ 
+-	err = libusb_clear_halt(dev->libusb_handle,
+-		    (uhe->desc.bEndpointAddress & USB_ENDPOINT_NUMBER_MASK));
++	err = libusb_clear_halt(dev->libusb_handle, uhe->desc.bEndpointAddress);
+ 	if (err < 0) {
+ 		switch (err) {
+ 		case LIBUSB_ERROR_NO_DEVICE:
+@@ -743,7 +742,7 @@ usb_control_msg(struct usb_device *dev, unsigned int pipe,
+ {
+ 	struct usb_host_endpoint *uhe;
+ 	int err;
+-	uint8_t type, addr;
++	uint8_t type, num;
+ 
+ 	atomic_lock();
+ 	uhe = usb_find_host_endpoint(dev, pipe);
+@@ -752,9 +751,9 @@ usb_control_msg(struct usb_device *dev, unsigned int pipe,
+ 		return (-EINVAL);
+ 	}
+ 	type = (uhe->desc.bmAttributes & USB_ENDPOINT_XFERTYPE_MASK);
+-	addr = (uhe->desc.bEndpointAddress & USB_ENDPOINT_NUMBER_MASK);
+-	/* TODO: check if any caller sends control messages to addr > 0 */
+-	if ((type != USB_ENDPOINT_XFER_CONTROL) || (addr != 0)) {
++	num = (uhe->desc.bEndpointAddress & USB_ENDPOINT_NUMBER_MASK);
++	/* TODO: check if any caller sends control messages to EP > 0 */
++	if ((type != USB_ENDPOINT_XFER_CONTROL) || (num != 0)) {
+ 		return (-EINVAL);
+ 	}
+ 
+-- 
+2.15.2 (Apple Git-101.1)
+

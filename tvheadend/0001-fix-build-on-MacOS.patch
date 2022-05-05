@@ -1,0 +1,603 @@
+From 3df5abb815c940da478981b5421fb2e241f8a0d3 Mon Sep 17 00:00:00 2001
+From: Jan Hauffa <jhauffa@gmail.com>
+Date: Sun, 12 Jan 2014 03:39:36 +0100
+Subject: [PATCH 1/4] fix build on MacOS
+
+---
+ Makefile                                 | 11 ++++++++++-
+ src/descrambler/capmt.c                  |  2 +-
+ src/descrambler/cwc.c                    |  1 -
+ src/epggrab/channel.c                    |  2 +-
+ src/epggrab/module/opentv.c              |  4 ++++
+ src/idnode.c                             | 10 +++++++++-
+ src/input/mpegts.h                       |  4 ++++
+ src/input/mpegts/dvb_psi.c               |  5 +++++
+ src/input/mpegts/dvb_support.c           |  2 ++
+ src/input/mpegts/iptv/iptv_udp.c         | 13 ++++++++++++-
+ src/input/mpegts/linuxdvb/linuxdvb_mux.c |  2 +-
+ src/input/mpegts/tsfile/tsfile_input.c   |  4 ++++
+ src/lang_codes.c                         |  2 +-
+ src/libav.c                              |  2 +-
+ src/macos_compat.c                       | 31 +++++++++++++++++++++++++++++++
+ src/main.c                               |  6 ++++++
+ src/tcp.c                                | 15 +++++++++++----
+ src/trap.c                               |  2 +-
+ src/tvheadend.h                          | 13 +++++++++++++
+ src/tvhlog.c                             |  6 ++++++
+ src/webui/webui.c                        |  7 +++++--
+ src/wrappers.c                           | 14 +++++++++++++-
+ support/posix.mk                         |  2 +-
+ 23 files changed, 142 insertions(+), 18 deletions(-)
+ create mode 100644 src/macos_compat.c
+
+diff --git a/Makefile b/Makefile
+index 5d7bfb19..649c99f4 100644
+--- a/Makefile
++++ b/Makefile
+@@ -23,16 +23,24 @@
+ include $(dir $(lastword $(MAKEFILE_LIST))).config.mk
+ PROG    := $(BUILDDIR)/tvheadend
+ 
++PLATFORM=$(shell uname)
++
+ #
+ # Common compiler flags
+ #
+ 
+ CFLAGS  += -Wall -Werror -Wwrite-strings -Wno-deprecated-declarations
+ CFLAGS  += -Wmissing-prototypes -fms-extensions
++ifeq ($(PLATFORM),Darwin)
++CFLAGS  += -Wno-microsoft
++endif
+ CFLAGS  += -g -funsigned-char -O2 
+ CFLAGS  += -D_FILE_OFFSET_BITS=64
+ CFLAGS  += -I${BUILDDIR} -I${ROOTDIR}/src -I${ROOTDIR}
+-LDFLAGS += -lrt -ldl -lpthread -lm
++ifneq ($(PLATFORM),Darwin)
++LDFLAGS += -lrt
++endif
++LDFLAGS += -ldl -lpthread -lm
+ 
+ vpath %.c $(ROOTDIR)
+ vpath %.h $(ROOTDIR)
+@@ -112,6 +120,7 @@ SRCS =  src/version.c \
+ 	src/service_mapper.c \
+ 	src/input.c \
+ 	src/http/http_client.c \
++	src/macos_compat.c \
+ 
+ SRCS += \
+ 	src/api.c \
+diff --git a/src/descrambler/capmt.c b/src/descrambler/capmt.c
+index d71c5a85..461ee492 100644
+--- a/src/descrambler/capmt.c
++++ b/src/descrambler/capmt.c
+@@ -69,7 +69,7 @@
+ #define CW_DUMP(buf, len, format, ...) \
+   printf(format, __VA_ARGS__); int j; for (j = 0; j < len; ++j) printf("%02X ", buf[j]); printf("\n");
+ 
+-#ifdef __GNUC__
++#if defined(__GNUC__) && !defined(__APPLE__)
+ #include <features.h>
+ #if __GNUC_PREREQ(4, 3)
+ #pragma GCC diagnostic ignored "-Warray-bounds"
+diff --git a/src/descrambler/cwc.c b/src/descrambler/cwc.c
+index b070d817..9a068476 100755
+--- a/src/descrambler/cwc.c
++++ b/src/descrambler/cwc.c
+@@ -490,7 +490,6 @@ cwc_send_msg(cwc_t *cwc, const uint8_t *msg, size_t len, int sid, int enq, uint1
+   tvhtrace("cwc", "sending message sid %d len %"PRIsize_t" enq %d", sid, len, enq);
+   tvhlog_hexdump("cwc", msg, len);
+ 
+-  if (len < 0) return -1;
+   buf[0] = (len - 2) >> 8;
+   buf[1] = (len - 2) & 0xff;
+   
+diff --git a/src/epggrab/channel.c b/src/epggrab/channel.c
+index 974bcf38..8cdff425 100644
+--- a/src/epggrab/channel.c
++++ b/src/epggrab/channel.c
+@@ -191,7 +191,7 @@ epggrab_channel_t *epggrab_channel_find
+   epggrab_channel_t *ec;
+   static epggrab_channel_t *skel = NULL;
+   if (!skel) skel = calloc(1, sizeof(epggrab_channel_t));
+-  skel->id = strdupa(id);
++  skel->id = tvh_strdupa(id);
+ 
+   /* Replace / with # */
+   // Note: this is a bit of a nasty fix for #1774, but will do for now
+diff --git a/src/epggrab/module/opentv.c b/src/epggrab/module/opentv.c
+index 3b2c7e02..b5cc2273 100644
+--- a/src/epggrab/module/opentv.c
++++ b/src/epggrab/module/opentv.c
+@@ -20,7 +20,11 @@
+ #include <assert.h>
+ #include <unistd.h>
+ #include <regex.h>
++
++#if ENABLE_DVBAPI
+ #include <linux/dvb/dmx.h>
++#endif
++
+ #include "tvheadend.h"
+ #include "channels.h"
+ #include "huffman.h"
+diff --git a/src/idnode.c b/src/idnode.c
+index c260f505..0a555aea 100644
+--- a/src/idnode.c
++++ b/src/idnode.c
+@@ -462,7 +462,11 @@ idnode_cmp_title
+ 
+ static int
+ idnode_cmp_sort
++#ifndef __APPLE__
+   ( const void *a, const void *b, void *s )
++#else
++  ( void *s, const void *a, const void *b )
++#endif
+ {
+   idnode_t      *ina  = *(idnode_t**)a;
+   idnode_t      *inb  = *(idnode_t**)b;
+@@ -488,7 +492,7 @@ idnode_cmp_sort
+     case PT_STR:
+       {
+         int r;
+-        const char *stra = strdupa(idnode_get_str(ina, sort->key) ?: "");
++        const char *stra = tvh_strdupa(idnode_get_str(ina, sort->key) ?: "");
+         const char *strb = idnode_get_str(inb, sort->key);
+         if (sort->dir == IS_ASC)
+           r = strcmp(stra ?: "", strb ?: "");
+@@ -660,7 +664,11 @@ void
+ idnode_set_sort
+   ( idnode_set_t *is, idnode_sort_t *sort )
+ {
++#ifndef __APPLE__
+   qsort_r(is->is_array, is->is_count, sizeof(idnode_t*), idnode_cmp_sort, sort);
++#else
++  qsort_r(is->is_array, is->is_count, sizeof(idnode_t*), sort, idnode_cmp_sort);
++#endif
+ }
+ 
+ void
+diff --git a/src/input/mpegts.h b/src/input/mpegts.h
+index 6f37f341..168fdd74 100644
+--- a/src/input/mpegts.h
++++ b/src/input/mpegts.h
+@@ -190,6 +190,10 @@ void mpegts_psi_section_reassemble
+  * Logical network
+  * *************************************************************************/
+ 
++#if !ENABLE_DVBAPI
++typedef void *dvb_mux_conf_t;
++#endif
++
+ /* Network */
+ struct mpegts_network
+ {
+diff --git a/src/input/mpegts/dvb_psi.c b/src/input/mpegts/dvb_psi.c
+index c6a98c6c..d7aa795c 100644
+--- a/src/input/mpegts/dvb_psi.c
++++ b/src/input/mpegts/dvb_psi.c
+@@ -30,8 +30,11 @@
+ #include <unistd.h>
+ #include <stdlib.h>
+ #include <string.h>
++
++#if ENABLE_DVBAPI
+ #include <linux/dvb/version.h>
+ #include <linux/dvb/frontend.h>
++#endif
+ 
+ static int
+ psi_parse_pmt(mpegts_service_t *t, const uint8_t *ptr, int len);
+@@ -852,12 +855,14 @@ dvb_nit_callback
+         case DVB_DESC_SAT_DEL:
+         case DVB_DESC_CABLE_DEL:
+         case DVB_DESC_TERR_DEL:
++#if ENABLE_DVBAPI
+           if (dtag == DVB_DESC_SAT_DEL)
+             mux = dvb_desc_sat_del(mm, onid, tsid, dptr, dlen);
+           else if (dtag == DVB_DESC_CABLE_DEL)
+             mux = dvb_desc_cable_del(mm, onid, tsid, dptr, dlen);
+           else
+             mux = dvb_desc_terr_del(mm, onid, tsid, dptr, dlen);
++#endif
+           if (mux) {
+             mpegts_mux_set_onid(mux, onid);
+             mpegts_mux_set_tsid(mux, tsid);
+diff --git a/src/input/mpegts/dvb_support.c b/src/input/mpegts/dvb_support.c
+index 5d74b8ff..b9895976 100644
+--- a/src/input/mpegts/dvb_support.c
++++ b/src/input/mpegts/dvb_support.c
+@@ -26,7 +26,9 @@
+ #include <stdlib.h>
+ #include <string.h>
+ 
++#if ENABLE_DVBAPI
+ #include <linux/dvb/frontend.h>
++#endif
+ 
+ #include "tvheadend.h"
+ #include "dvb.h"
+diff --git a/src/input/mpegts/iptv/iptv_udp.c b/src/input/mpegts/iptv/iptv_udp.c
+index 1d45d565..ccdaaff0 100644
+--- a/src/input/mpegts/iptv/iptv_udp.c
++++ b/src/input/mpegts/iptv/iptv_udp.c
+@@ -29,7 +29,7 @@
+ #include <netinet/in.h>
+ #if defined(PLATFORM_LINUX)
+ #include <linux/netdevice.h>
+-#elif defined(PLATFORM_FREEBSD)
++#elif defined(PLATFORM_FREEBSD) || defined(PLATFORM_MACOS)
+ #  include <netdb.h>
+ #  include <net/if.h>
+ #  ifndef IPV6_ADD_MEMBERSHIP
+@@ -50,6 +50,9 @@ iptv_udp_start ( iptv_mux_t *im, const url_t *url )
+   struct in_addr saddr;
+   struct in6_addr s6addr;
+   char name[256], buf[256];
++#if defined(PLATFORM_MACOS)
++  unsigned int index;
++#endif
+ 
+   im->mm_display_name((mpegts_mux_t*)im, name, sizeof(name));
+ 
+@@ -76,7 +79,11 @@ iptv_udp_start ( iptv_mux_t *im, const url_t *url )
+   memset(&ifr, 0, sizeof(ifr));
+   if (im->mm_iptv_interface && *im->mm_iptv_interface) {
+     snprintf(ifr.ifr_name, IFNAMSIZ, "%s", im->mm_iptv_interface);
++#if !defined(PLATFORM_MACOS)
+     if (ioctl(fd, SIOCGIFINDEX, &ifr)) {
++#else
++    if ((index = if_nametoindex(ifr.ifr_name)) == 0) {
++#endif
+       tvherror("iptv", "%s - could not find interface %s",
+                name, im->mm_iptv_interface);
+       goto error;
+@@ -108,6 +115,8 @@ iptv_udp_start ( iptv_mux_t *im, const url_t *url )
+     m.imr_ifindex        = ifr.ifr_ifindex;
+ #elif defined(PLATFORM_FREEBSD)
+     m.imr_ifindex        = ifr.ifr_index;
++#elif defined(PLATFORM_MACOS)
++    m.imr_ifindex        = index;
+ #endif
+ #ifdef SOL_IP
+     solip = SOL_IP;
+@@ -149,6 +158,8 @@ iptv_udp_start ( iptv_mux_t *im, const url_t *url )
+     m.ipv6mr_interface = ifr.ifr_ifindex;
+ #elif defined(PLATFORM_FREEBSD)
+     m.ipv6mr_interface = ifr.ifr_index;
++#elif defined(PLATFORM_MACOS)
++    m.ipv6mr_interface = index;
+ #endif
+ #ifdef SOL_IPV6
+     if (setsockopt(fd, SOL_IPV6, IPV6_ADD_MEMBERSHIP, &m, sizeof(m))) {
+diff --git a/src/input/mpegts/linuxdvb/linuxdvb_mux.c b/src/input/mpegts/linuxdvb/linuxdvb_mux.c
+index 0ef5ab90..96cfb424 100644
+--- a/src/input/mpegts/linuxdvb/linuxdvb_mux.c
++++ b/src/input/mpegts/linuxdvb/linuxdvb_mux.c
+@@ -443,7 +443,7 @@ linuxdvb_mux_dvbs_class_orbital_set ( void *o, const void *s )
+ {
+   int pos, save = 0;
+   char dir;
+-  char *tmp = strdupa(s);
++  char *tmp = tvh_strdupa(s);
+   linuxdvb_mux_t *lm = o;
+ 
+   dir = tmp[strlen(tmp)-1];
+diff --git a/src/input/mpegts/tsfile/tsfile_input.c b/src/input/mpegts/tsfile/tsfile_input.c
+index bd6a09a5..1ccf8bab 100644
+--- a/src/input/mpegts/tsfile/tsfile_input.c
++++ b/src/input/mpegts/tsfile/tsfile_input.c
+@@ -141,7 +141,11 @@ tsfile_input_thread ( void *aux )
+           d += pcr_last_realtime;
+           slp.tv_sec  = (d / 1000000);
+           slp.tv_nsec = (d % 1000000) * 1000;
++#ifndef __APPLE__
+           clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &slp, NULL);
++#else
++          nanosleep(&slp, NULL);
++#endif
+         }
+         pcr_last          = pcr;
+         pcr_last_realtime = getmonoclock();
+diff --git a/src/lang_codes.c b/src/lang_codes.c
+index a6e9b730..47ad33d5 100644
+--- a/src/lang_codes.c
++++ b/src/lang_codes.c
+@@ -526,7 +526,7 @@ static int _lang_code_lookup_add( lang_code_lookup_t* lookup_table, const lang_c
+   lang_code_lookup_element_t *element;
+   element = (lang_code_lookup_element_t *)calloc(1, sizeof(lang_code_lookup_element_t));
+   element->lang_code = code;
+-  RB_INSERT_SORTED(lookup_table, element, link, func);
++  (void) RB_INSERT_SORTED(lookup_table, element, link, func);
+   return 0;
+ }
+ 
+diff --git a/src/libav.c b/src/libav.c
+index 85d12770..f707961e 100644
+--- a/src/libav.c
++++ b/src/libav.c
+@@ -104,7 +104,7 @@ streaming_component_type2codec_id(streaming_component_type_t type)
+ streaming_component_type_t
+ codec_id2streaming_component_type(enum CodecID id)
+ {
+-  streaming_component_type_t type = CODEC_ID_NONE;
++  streaming_component_type_t type = SCT_NONE;
+ 
+   switch(id) {
+   case CODEC_ID_H264:
+diff --git a/src/macos_compat.c b/src/macos_compat.c
+new file mode 100644
+index 00000000..8b7db396
+--- /dev/null
++++ b/src/macos_compat.c
+@@ -0,0 +1,31 @@
++#ifdef __APPLE__
++
++#include <time.h>
++#include <mach/mach.h>
++#include <mach/clock.h>
++
++#define CLOCK_REALTIME 0
++#define CLOCK_MONOTONIC 1
++
++int clock_gettime(int clk_id, struct timespec *tp);
++
++int clock_gettime(int clk_id, struct timespec *tp)
++{
++	clock_serv_t cclock;
++	mach_timespec_t mts;
++	int retval = 0;
++	int mach_clk_id = CALENDAR_CLOCK;
++
++	if (clk_id == CLOCK_MONOTONIC)
++		mach_clk_id = SYSTEM_CLOCK;
++
++	host_get_clock_service(mach_host_self(), mach_clk_id, &cclock);
++	retval = clock_get_time(cclock, &mts);
++	mach_port_deallocate(mach_task_self(), cclock);
++
++	tp->tv_sec = mts.tv_sec;
++	tp->tv_nsec = mts.tv_nsec;
++	return retval;
++}
++
++#endif	/* __APPLE__ */
+diff --git a/src/main.c b/src/main.c
+index 967eddfb..7829c7f9 100644
+--- a/src/main.c
++++ b/src/main.c
+@@ -29,7 +29,9 @@
+ #include <limits.h>
+ #include <time.h>
+ #include <locale.h>
++#ifndef __APPLE__
+ #include <sys/prctl.h>
++#endif
+ 
+ #include <pwd.h>
+ #include <grp.h>
+@@ -681,9 +683,13 @@ main(int argc, char **argv)
+ 
+     /* Make dumpable */
+     if (opt_dump) {
++#ifndef __APPLE__
+       if (chdir("/tmp"))
+         tvhwarn("START", "failed to change cwd to /tmp");
+       prctl(PR_SET_DUMPABLE, 1);
++#else
++      tvhwarn("START", "not supported on MacOS X");
++#endif
+     }
+ 
+     umask(0);
+diff --git a/src/tcp.c b/src/tcp.c
+index 20a204a4..17e212c7 100644
+--- a/src/tcp.c
++++ b/src/tcp.c
+@@ -49,13 +49,16 @@ tcp_connect(const char *hostname, int port, char *errbuf, size_t errbufsize,
+ 	    int timeout)
+ {
+   const char *errtxt;
+-  struct hostent hostbuf, *hp;
+-  char *tmphstbuf;
+-  size_t hstbuflen;
+-  int herr, fd, r, res, err;
++  struct hostent *hp;
++  int herr, fd, r, res = 0, err;
+   struct sockaddr_in6 in6;
+   struct sockaddr_in in;
+   socklen_t errlen = sizeof(int);
++  char *tmphstbuf = NULL;
++
++#ifndef __APPLE__
++  struct hostent hostbuf;
++  size_t hstbuflen;
+ 
+   hstbuflen = 1024;
+   tmphstbuf = malloc(hstbuflen);
+@@ -65,6 +68,10 @@ tcp_connect(const char *hostname, int port, char *errbuf, size_t errbufsize,
+     hstbuflen *= 2;
+     tmphstbuf = realloc(tmphstbuf, hstbuflen);
+   }
++#else
++  hp = gethostbyname(hostname);
++  herr = h_errno;
++#endif
+   
+   if(res != 0) {
+     snprintf(errbuf, errbufsize, "Resolver internal error");
+diff --git a/src/trap.c b/src/trap.c
+index 42697906..0b39499b 100644
+--- a/src/trap.c
++++ b/src/trap.c
+@@ -20,7 +20,7 @@
+ 
+ char tvh_binshasum[20];
+ 
+-#if defined(__i386__) || defined(__x86_64__)
++#if !defined(__APPLE__) && (defined(__i386__) || defined(__x86_64__))
+ 
+ // Only do this on x86 for now
+ 
+diff --git a/src/tvheadend.h b/src/tvheadend.h
+index bc7b5dca..61d43f94 100644
+--- a/src/tvheadend.h
++++ b/src/tvheadend.h
+@@ -482,6 +482,12 @@ static inline unsigned int tvh_strhash(const char *s, unsigned int mod)
+ void tvh_str_set(char **strp, const char *src);
+ int tvh_str_update(char **strp, const char *src);
+ 
++#ifdef __APPLE__
++#define CLOCK_REALTIME 0
++#define CLOCK_MONOTONIC 1
++int clock_gettime(int clk_id, struct timespec *tp);
++#endif
++
+ #ifndef CLOCK_MONOTONIC_COARSE
+ #define CLOCK_MONOTONIC_COARSE CLOCK_MONOTONIC
+ #endif
+@@ -604,11 +610,13 @@ int rmtree ( const char *path );
+ char *regexp_escape ( const char *str );
+ 
+ /* glibc wrapper */
++#ifndef __APPLE__
+ #if !__GLIBC_PREREQ(2,8)
+ void
+ qsort_r(void *base, size_t nmemb, size_t size,
+        int (*cmp)(const void *, const void *, void *), void *aux);
+ #endif
++#endif
+ 
+ /* printing */
+ # if __WORDSIZE == 64
+@@ -620,8 +628,13 @@ qsort_r(void *base, size_t nmemb, size_t size,
+ #endif
+ #define PRIslongword_t  "ld"
+ #define PRIulongword_t  "lu"
++#ifndef __APPLE__
+ #define PRIsize_t       PRIuword_t
+ #define PRIssize_t      PRIsword_t
++#else
++#define PRIsize_t       "zu"
++#define PRIssize_t      "zd"
++#endif
+ #if __WORDSIZE == 32 && defined(PLATFORM_FREEBSD)
+ #define PRItime_t       PRIsword_t
+ #else
+diff --git a/src/tvhlog.c b/src/tvhlog.c
+index ac42dc3c..b8580e5b 100644
+--- a/src/tvhlog.c
++++ b/src/tvhlog.c
+@@ -307,7 +307,13 @@ void tvhlogv ( const char *file, int line,
+   /* Basic message */
+   l = 0;
+   if (options & TVHLOG_OPT_THREAD) {
++#ifndef __APPLE__	/* pthread_t is not a TID on MacOS X */
+     l += snprintf(buf + l, sizeof(buf) - l, "tid %ld: ", pthread_self());
++#else
++    uint64_t tid;
++    pthread_threadid_np(NULL, &tid);
++    l += snprintf(buf + l, sizeof(buf) - l, "tid %lld: ", tid);
++#endif
+   }
+   l += snprintf(buf + l, sizeof(buf) - l, "%s: ", subsys);
+   if (options & TVHLOG_OPT_FILELINE && severity >= LOG_DEBUG)
+diff --git a/src/webui/webui.c b/src/webui/webui.c
+index 10de15a7..63f11d1a 100644
+--- a/src/webui/webui.c
++++ b/src/webui/webui.c
+@@ -49,7 +49,7 @@
+ 
+ #if defined(PLATFORM_LINUX)
+ #include <sys/sendfile.h>
+-#elif defined(PLATFORM_FREEBSD)
++#elif defined(PLATFORM_FREEBSD) || defined(PLATFORM_MACOS)
+ #include <sys/types.h>
+ #include <sys/socket.h>
+ #include <sys/uio.h>
+@@ -924,7 +924,7 @@ page_dvrfile(http_connection_t *hc, const char *remain, void *opaque)
+   off_t content_len, file_start, file_end, chunk;
+ #if defined(PLATFORM_LINUX)
+   ssize_t r;
+-#elif defined(PLATFORM_FREEBSD)
++#elif defined(PLATFORM_FREEBSD) || defined(PLATFORM_MACOS)
+   off_t r;
+ #endif
+   
+@@ -1011,6 +1011,9 @@ page_dvrfile(http_connection_t *hc, const char *remain, void *opaque)
+       r = sendfile(hc->hc_fd, fd, NULL, chunk);
+ #elif defined(PLATFORM_FREEBSD)
+       sendfile(fd, hc->hc_fd, 0, chunk, NULL, &r, 0);
++#elif defined(PLATFORM_MACOS)
++      sendfile(fd, hc->hc_fd, 0, &chunk, NULL, 0);
++      r = chunk;
+ #endif
+       if(r == -1) {
+   close(fd);
+diff --git a/src/wrappers.c b/src/wrappers.c
+index 4167b902..e75857b8 100644
+--- a/src/wrappers.c
++++ b/src/wrappers.c
+@@ -3,7 +3,9 @@
+ #include <fcntl.h>
+ #include <sys/types.h>          /* See NOTES */
+ #include <sys/socket.h>
++#ifndef __APPLE__
+ #include <sys/prctl.h>
++#endif
+ #include <unistd.h>
+ #include <pthread.h>
+ 
+@@ -94,12 +96,20 @@ thread_wrapper ( void *p )
+ {
+   struct thread_state *ts = p;
+ 
++#ifndef __APPLE__
+   /* Set name */
+   prctl(PR_SET_NAME, ts->name);
+ 
+-  /* Run */
+   tvhdebug("thread", "created thread %ld [%s / %p(%p)]",
+            pthread_self(), ts->name, ts->run, ts->arg);
++#else
++  uint64_t tid;
++  pthread_threadid_np(NULL, &tid);
++  tvhdebug("thread", "created thread %lld [%s / %p(%p)]",
++           tid, ts->name, ts->run, ts->arg);
++#endif
++
++  /* Run */
+   void *r = ts->run(ts->arg);
+   free(ts);
+ 
+@@ -127,6 +137,7 @@ tvhthread_create0
+  * qsort_r wrapper for pre GLIBC 2.8
+  */
+ 
++#ifndef __APPLE__
+ #if !__GLIBC_PREREQ(2,8)
+ static __thread struct {
+   int (*cmp) ( const void *a, const void *b, void *p );
+@@ -148,3 +159,4 @@ qsort_r(void *base, size_t nmemb, size_t size,
+   qsort(base, nmemb, size, qsort_r_wrap);
+ }
+ #endif /* GLIBC < 2.8 */
++#endif /* not MacOS X */
+diff --git a/support/posix.mk b/support/posix.mk
+index db621b80..917e92cb 100644
+--- a/support/posix.mk
++++ b/support/posix.mk
+@@ -12,7 +12,7 @@ install: ${PROG} ${MAN}
+ 
+ 	for bundle in ${BUNDLES}; do \
+ 		mkdir -p ${DESTDIR}${datadir}/tvheadend/$$bundle ;\
+-		cp -Lr $(ROOTDIR)/$$bundle/*  ${DESTDIR}${datadir}/tvheadend/$$bundle ;\
++		cp -LR $(ROOTDIR)/$$bundle/*  ${DESTDIR}${datadir}/tvheadend/$$bundle ;\
+ 	done
+ 
+ 	find ${DESTDIR}${datadir}/tvheadend -name .git -exec rm -rf {} \; &>/dev/null || /bin/true
+-- 
+2.15.2 (Apple Git-101.1)
+

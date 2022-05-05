@@ -1,0 +1,47 @@
+From b064c2f93b79aa5fa688c98f7756f1a57af03f6c Mon Sep 17 00:00:00 2001
+From: Jan Hauffa <jhauffa@gmail.com>
+Date: Sun, 19 Jan 2014 20:04:17 +0100
+Subject: [PATCH 12/16] explicity unblock required POSIX signals
+
+---
+ kernel/linux_thread.c | 4 ++++
+ kernel/linux_timer.c  | 5 +++++
+ 2 files changed, 9 insertions(+)
+
+diff --git a/kernel/linux_thread.c b/kernel/linux_thread.c
+index 8645d28..59081c1 100644
+--- a/kernel/linux_thread.c
++++ b/kernel/linux_thread.c
+@@ -469,9 +469,13 @@ kthread_wrapper(void *arg)
+ {
+ 	struct funcdata fd = *(struct funcdata *)arg;
+ 	struct thread_wrapper wrapper = {0};
++	sigset_t set;
+ 
+ 	pthread_setspecific(wrapper_key, &wrapper);
+ 
++	sigemptyset(&set);
++	sigaddset(&set, SIGURG);
++	pthread_sigmask(SIG_UNBLOCK, &set, NULL);
+ 	signal(SIGURG, thread_urg);
+ 
+ 	pthread_mutex_lock(&atomic_mutex);
+diff --git a/kernel/linux_timer.c b/kernel/linux_timer.c
+index c1c5d31..c67735c 100644
+--- a/kernel/linux_timer.c
++++ b/kernel/linux_timer.c
+@@ -107,6 +107,11 @@ timer_exec(void *arg)
+ 	struct timer_list *t;
+ 	uint32_t ms_delay = 0;
+ 
++	sigset_t set;
++
++	sigemptyset(&set);
++	sigaddset(&set, SIGIO);
++	pthread_sigmask(SIG_UNBLOCK, &set, NULL);
+ 	signal(SIGIO, &timer_io);
+ 
+ 	timer_thread_started = 1;
+-- 
+2.15.2 (Apple Git-101.1)
+

@@ -1,0 +1,25 @@
+From 24fb532c42c155425030d270855623ef2526a3b6 Mon Sep 17 00:00:00 2001
+From: Jan Hauffa <jhauffa@gmail.com>
+Date: Mon, 20 Jan 2014 22:34:41 +0100
+Subject: [PATCH 3/4] correct minimum length of CAT
+
+---
+ src/input/mpegts/dvb_psi.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/input/mpegts/dvb_psi.c b/src/input/mpegts/dvb_psi.c
+index d7aa795c..0ef9366a 100644
+--- a/src/input/mpegts/dvb_psi.c
++++ b/src/input/mpegts/dvb_psi.c
+@@ -674,7 +674,7 @@ dvb_cat_callback
+   mpegts_table_state_t  *st  = NULL;
+ 
+   /* Start */
+-  r = dvb_table_begin(mt, ptr, len, tableid, 0, 7, &st, &sect, &last, &ver);
++  r = dvb_table_begin(mt, ptr, len, tableid, 0, 5, &st, &sect, &last, &ver);
+   if (r != 1) return r;
+   ptr += 5;
+   len -= 5;
+-- 
+2.15.2 (Apple Git-101.1)
+

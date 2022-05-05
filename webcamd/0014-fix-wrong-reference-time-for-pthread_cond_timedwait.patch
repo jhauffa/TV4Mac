@@ -1,0 +1,38 @@
+From db25e7270fc80342a16f35c01bb231e3b6fc44cb Mon Sep 17 00:00:00 2001
+From: Jan Hauffa <jhauffa@gmail.com>
+Date: Mon, 20 Jan 2014 14:43:30 +0100
+Subject: [PATCH 14/16] fix wrong reference time for pthread_cond_timedwait
+
+---
+ kernel/linux_thread.c | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/kernel/linux_thread.c b/kernel/linux_thread.c
+index 59081c1..1ebdfef 100644
+--- a/kernel/linux_thread.c
++++ b/kernel/linux_thread.c
+@@ -179,10 +179,21 @@ __wait_get_timeout(uint64_t timeout, struct timespec *ts)
+ 	ts[0].tv_nsec = timeout % 1000000000ULL;
+ 	ts[0].tv_sec = timeout / 1000000000ULL;
+ 
++#ifndef __APPLE__
+ 	clock_gettime(CLOCK_MONOTONIC, ts + 1);
+ 
+ 	ts[0].tv_sec += ts[1].tv_sec;
+ 	ts[0].tv_nsec += ts[1].tv_nsec;
++#else
++	/* On MacOS, pthread_cond_timedwait uses gettimeofday internally. */
++	{
++		struct timeval tv;
++		gettimeofday(&tv, NULL);
++
++		ts[0].tv_sec += tv.tv_sec;
++		ts[0].tv_nsec += tv.tv_usec * 1000L;
++	}
++#endif
+ 
+ 	if (ts[0].tv_nsec >= 1000000000) {
+ 		ts[0].tv_sec++;
+-- 
+2.15.2 (Apple Git-101.1)
+

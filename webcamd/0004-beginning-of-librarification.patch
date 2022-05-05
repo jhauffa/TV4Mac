@@ -1,0 +1,247 @@
+From 92335bf2f5fec204886f4fddc9cb0f1236ee9d20 Mon Sep 17 00:00:00 2001
+From: Jan Hauffa <jhauffa@gmail.com>
+Date: Sun, 12 Jan 2014 21:18:44 +0100
+Subject: [PATCH 04/16] beginning of "librarification"
+
+---
+ .gitignore          |  4 +++-
+ Makefile            | 18 ++++++++++++---
+ kernel/linux_file.c | 28 +++++++++++++++++++++++
+ kernel/linux_file.h |  1 +
+ webcamd.c           | 65 +++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 5 files changed, 112 insertions(+), 4 deletions(-)
+
+diff --git a/.gitignore b/.gitignore
+index a25b579..d7c2673 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -1,5 +1,7 @@
+ .DS_Store
+ do_patch.tmp
+ long_size_test
+-*.o
++*.oo
++*.So
++*.dylib
+ /media_tree
+diff --git a/Makefile b/Makefile
+index c43b73a..6f05fe2 100644
+--- a/Makefile
++++ b/Makefile
+@@ -188,7 +188,11 @@ CFLAGS+= -g
+ #
+ # List of linker flags
+ #
++.if !defined(HAVE_MACOS)
+ LDFLAGS+= -L${LIBDIR} -lusb -lcuse4bsd ${PTHREAD_LIBS} -lutil
++.else
++LDFLAGS+= -L${LIBDIR} ${PTHREAD_LIBS}
++.endif
+ 
+ #
+ # List of Linux specific sources
+@@ -227,9 +231,16 @@ SRCS+= vtuner_client.c
+ SRCS+= vtuner_server.c
+ .endif
+ 
+-OBJS+= macos_compat.o
+-
++.if defined (HAVE_MACOS)
++OBJS+= macos_compat.oo
++LIB= 
++SHLIB= webcamd
++SHLIB_MAJOR= 1
++SHLIB_MINOR= 0
++.include <bsd.lib.mk>
++.else
+ .include <bsd.prog.mk>
++.endif
+ 
+ patch:
+ 	cd patches ; ./do_patch.sh
+@@ -292,7 +303,8 @@ help:
+ 	@echo "# pwcview"
+ 	@echo "#"
+ 
+-macos_compat.o:
++.SUFFIXES: .oo
++.c.oo:
+ 	$(CC) -c $< -o $@
+ 
+ tools/linux_make/linux_make:
+diff --git a/kernel/linux_file.c b/kernel/linux_file.c
+index 373ccc2..6f55193 100644
+--- a/kernel/linux_file.c
++++ b/kernel/linux_file.c
+@@ -56,6 +56,10 @@ linux_open(int f_v4b, int fflags)
+ 	if (cdev->ops->open == NULL)
+ 		return (handle);
+ 
++#ifdef __APPLE__
++	set_current_cdev_handle(handle);
++#endif
++
+ 	if ((error = -cdev->ops->open(&handle->fixed_inode, &handle->fixed_file))) {
+ 		free(handle);
+ 		return (NULL);
+@@ -72,6 +76,10 @@ linux_close(struct cdev_handle *handle)
+ 	if (handle == NULL)
+ 		return (0);
+ 
++#ifdef __APPLE__
++	set_current_cdev_handle(handle);
++#endif
++
+ 	/* release all memory mapped regions */
+ 	for (i = 0; i != LINUX_VMA_MAX; i++) {
+ 		if (handle->fixed_vma[i].vm_buffer_address == NULL)
+@@ -124,6 +132,10 @@ linux_ioctl(struct cdev_handle *handle, int fflags,
+ 	if (handle == NULL)
+ 		return (-EINVAL);
+ 
++#ifdef __APPLE__
++	set_current_cdev_handle(handle);
++#endif
++
+ 	linux_fix_f_flags(&handle->fixed_file, fflags);
+ 
+ 	if (handle->fixed_file.f_op->unlocked_ioctl != NULL)
+@@ -147,6 +159,10 @@ linux_poll(struct cdev_handle *handle)
+ 	if (handle->fixed_file.f_op->poll == NULL)
+ 		return (POLLNVAL);
+ 
++#ifdef __APPLE__
++	set_current_cdev_handle(handle);
++#endif
++
+ 	error = handle->fixed_file.f_op->poll(&handle->fixed_file, NULL);
+ 
+ 	return (error);
+@@ -164,6 +180,10 @@ linux_read(struct cdev_handle *handle, int fflags, char *ptr, size_t len)
+ 	if (handle->fixed_file.f_op->read == NULL)
+ 		return (-EINVAL);
+ 
++#ifdef __APPLE__
++	set_current_cdev_handle(handle);
++#endif
++
+ 	linux_fix_f_flags(&handle->fixed_file, fflags);
+ 
+ 	error = handle->fixed_file.f_op->read(&handle->fixed_file, ptr, len, &off);
+@@ -183,6 +203,10 @@ linux_write(struct cdev_handle *handle, int fflags, char *ptr, size_t len)
+ 	if (handle->fixed_file.f_op->write == NULL)
+ 		return (-EINVAL);
+ 
++#ifdef __APPLE__
++	set_current_cdev_handle(handle);
++#endif
++
+ 	linux_fix_f_flags(&handle->fixed_file, fflags);
+ 
+ 	error = handle->fixed_file.f_op->write(&handle->fixed_file, ptr, len, &off);
+@@ -203,6 +227,10 @@ linux_mmap(struct cdev_handle *handle, int fflags,
+ 	if (handle->fixed_file.f_op->mmap == NULL)
+ 		return (MAP_FAILED);
+ 
++#ifdef __APPLE__
++	set_current_cdev_handle(handle);
++#endif
++
+ 	/* sanity checks */
+ 	if (len == 0)
+ 		return (MAP_FAILED);
+diff --git a/kernel/linux_file.h b/kernel/linux_file.h
+index f575ddd..0aa1296 100644
+--- a/kernel/linux_file.h
++++ b/kernel/linux_file.h
+@@ -35,6 +35,7 @@ void   *linux_mmap(struct cdev_handle *, int fflags, uint8_t *addr, size_t len,
+ int	linux_poll(struct cdev_handle *);
+ int	linux_get_user_pages(unsigned long start, int npages, int write, int force, struct page **ppages, struct vm_area_struct **pvm);
+ 
++void set_current_cdev_handle(struct cdev_handle *handle);
+ struct cdev_handle *get_current_cdev_handle(void);
+ 
+ #endif					/* _LINUX_FILE_H_ */
+diff --git a/webcamd.c b/webcamd.c
+index d8755e8..a1507e9 100644
+--- a/webcamd.c
++++ b/webcamd.c
+@@ -23,6 +23,8 @@
+  * SUCH DAMAGE.
+  */
+ 
++#ifndef __APPLE__
++
+ #include <sys/mman.h>
+ #include <sys/types.h>
+ #include <sys/param.h>
+@@ -805,3 +807,66 @@ get_current_cdev_handle(void)
+ 
+ 	return (cuse_dev_get_per_file_handle(cdev));
+ }
++
++#else
++
++char global_fw_prefix[128] = {"/Library/Application Support/TV4Mac"};
++
++unsigned long
++copy_to_user(void *to, const void *from, unsigned long n)
++{
++	memcpy(to, from, n);
++	return (0);
++}
++
++unsigned long
++copy_from_user(void *to, const void *from, unsigned long n)
++{
++	memcpy(to, from, n);
++	return (0);
++}
++
++int
++is_vmalloc_addr(void *addr)
++{
++	return (0);
++}
++
++void   *
++malloc_vm(size_t size)
++{
++	return (malloc(size));
++}
++
++void
++free_vm(void *ptr)
++{
++	free(ptr);
++}
++
++int
++check_signal(void)
++{
++	return (thread_got_stopping() == 0);
++}
++
++void
++poll_wakeup_internal(void)
++{
++}
++
++static struct cdev_handle *current_cdev = NULL;
++
++void
++set_current_cdev_handle(struct cdev_handle *handle)
++{
++	current_cdev = handle;
++}
++
++struct cdev_handle *
++get_current_cdev_handle(void)
++{
++	return current_cdev;
++}
++
++#endif
+-- 
+2.15.2 (Apple Git-101.1)
+

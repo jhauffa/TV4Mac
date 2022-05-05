@@ -1,0 +1,122 @@
+From 1032f6612558b56045f565a7e832b49164a891bb Mon Sep 17 00:00:00 2001
+From: Jan Hauffa <jhauffa@gmail.com>
+Date: Sun, 5 Jan 2014 13:12:01 +0100
+Subject: [PATCH 02/16] fix/silence some media_tree warnings
+
+---
+ Makefile               |  3 ++-
+ kernel/linux_defs.h    | 23 +++++++++++++++++++++++
+ tests/long_size_test.c |  2 +-
+ 3 files changed, 26 insertions(+), 2 deletions(-)
+
+diff --git a/Makefile b/Makefile
+index 36fa84e..f13703b 100644
+--- a/Makefile
++++ b/Makefile
+@@ -135,7 +135,8 @@ CFLAGS+= -D_GNU_SOURCE
+ CFLAGS+= -DCURR_FILE_NAME=\"${.TARGET:C/\.o//g}\"
+ CFLAGS+= -DBITS_PER_LONG=${BITS_PER_LONG}
+ CFLAGS+= -DLINUX
+-CFLAGS+= -Wall -Wno-pointer-sign -Wno-unused-variable
++CFLAGS+= -Wall -Wno-pointer-sign
++CFLAGS+= -Wno-unused-variable -Wno-unused-value -Wno-unused-function
+ 
+ CFLAGS+= -I${.CURDIR}
+ CFLAGS+= -I${.CURDIR}/dummy
+diff --git a/kernel/linux_defs.h b/kernel/linux_defs.h
+index 38aee32..f32bf90 100644
+--- a/kernel/linux_defs.h
++++ b/kernel/linux_defs.h
+@@ -44,7 +44,11 @@
+ #define	__user
+ #define	__kernel
+ #define	__safe
++
++#ifndef __deprecated
+ #define	__deprecated
++#endif
++
+ #define	__force
+ #define	__nocast
+ #define	__iomem
+@@ -88,6 +92,8 @@
+ #define	ALIGN(x,a)		(((x)+(a)-1)&(~((a)-1)))
+ #define	PAGE_OFFSET	0
+ #define	__pa(x)                 ((unsigned long)(x)-PAGE_OFFSET)
++
++#ifndef __APPLE__
+ #define	S_IRUSR 00400
+ #define	S_IWUSR 00200
+ #define	S_IXUSR 00100
+@@ -97,18 +103,25 @@
+ #define	S_IROTH 00004
+ #define	S_IWOTH 00002
+ #define	S_IXOTH 00001
++#endif
+ #define	S_IRUGO (S_IRUSR|S_IRGRP|S_IROTH)
+ #define	S_IWUGO (S_IWUSR|S_IWGRP|S_IWOTH)
++
+ #define	offsetof(t, m) ((uint8_t *)&((t *)0)->m - (uint8_t *)0)
+ #define	container_of(ptr, t, m) ((t *)((uint8_t *)(ptr) - offsetof(t, m)))
+ #define	__devinitdata
+ #define	__init
+ #define	__exit
+ #define	__stringify(x)	#x
++
+ #define	ERESTARTSYS     512
+ #define	ENOIOCTLCMD     513
+ #define	EMEDIUMTYPE	514
++
++#ifndef ENODATA
+ #define	ENODATA		515
++#endif
++
+ #define	symbol_request(x) (&(x))
+ #define	symbol_put(x) __nop
+ #define	EXPORT_SYMBOL(...)
+@@ -243,7 +256,11 @@
+ 	temp_ptr;				\
+ })
+ #define	DEFAULT_POLLMASK POLLNVAL
++
++#ifndef POLL_ERR
+ #define	POLL_ERR POLLERR
++#endif
++
+ #define	IOCSIZE_MASK (_IOC_SIZEMASK << _IOC_SIZESHIFT)
+ #define	_IOC_TYPE(cmd) IOCGROUP(cmd)
+ #define	_IOC_SIZE(cmd) IOCPARM_LEN(cmd)
+@@ -381,11 +398,17 @@
+ #define	simple_strtol strtol
+ #define	strict_strtol(a,b,c) ({char *_pp; *(c) = strtol(a,&_pp,b); _pp;})
+ #define	noop_llseek 0
++
++#ifndef ETIME
+ #define	ETIME ETIMEDOUT
++#endif
++#ifndef ENOSR
+ #define	ENOSR ENOBUFS
++#endif
+ #define	ENOTSUPP ENOTSUP
+ #define	EREMOTEIO EIO
+ #define	EBADRQC EBADMSG
++
+ #define	I2C_NAME_SIZE 20
+ #define	__SPIN_LOCK_UNLOCKED(...) {}
+ #define	in_interrupt() 0
+diff --git a/tests/long_size_test.c b/tests/long_size_test.c
+index 21f0b70..cc6c0e4 100644
+--- a/tests/long_size_test.c
++++ b/tests/long_size_test.c
+@@ -2,7 +2,7 @@
+ int
+ main()
+ {
+-	printf("%d", 8 * sizeof(long));
++	printf("%zu", 8 * sizeof(long));
+ 	return (0);
+ }
+ 
+-- 
+2.15.2 (Apple Git-101.1)
+

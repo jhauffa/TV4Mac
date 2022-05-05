@@ -1,0 +1,74 @@
+From f11decf101b2e753d2d0f611d779bc9643465840 Mon Sep 17 00:00:00 2001
+From: Jan Hauffa <jhauffa@gmail.com>
+Date: Mon, 27 Jan 2014 21:36:55 +0100
+Subject: [PATCH 16/16] build system fixes
+
+---
+ Makefile            | 16 ++++++++++++++--
+ kernel/linux_defs.h |  1 -
+ 2 files changed, 14 insertions(+), 3 deletions(-)
+
+diff --git a/Makefile b/Makefile
+index 2cc1e48..2093d75 100644
+--- a/Makefile
++++ b/Makefile
+@@ -118,6 +118,12 @@ MLINKS=
+ BITS_PER_LONG!=${CC} -o long_size_test ${.CURDIR}/tests/long_size_test.c && ./long_size_test
+ PTHREAD_LIBS?=	-lpthread
+ 
++.if !defined(HAVE_MACOS)
++MAKE?=		make
++.else
++MAKE?=		bsdmake
++.endif
++
+ .include "${.CURDIR}/build/obj-y/Makefile"
+ 
+ #
+@@ -132,7 +138,13 @@ SRCPATHS+= vtuner
+ # List of compiler flags
+ #
+ CFLAGS+= -D_GNU_SOURCE
++.if !defined(HAVE_MACOS)
+ CFLAGS+= -DCURR_FILE_NAME=\"${.TARGET:C/\.o//g}\"
++CFLAGS+= -DKBUILD_MODNAME=\"${.TARGET:C/\.o//g}\"
++.else
++CFLAGS+= -DCURR_FILE_NAME=\"${.TARGET:C/\.So//g}\"
++CFLAGS+= -DKBUILD_MODNAME=\"${.TARGET:C/\.So//g}\"
++.endif
+ CFLAGS+= -DBITS_PER_LONG=${BITS_PER_LONG}
+ CFLAGS+= -DLINUX
+ CFLAGS+= -Wall -Wno-pointer-sign
+@@ -281,7 +293,7 @@ fetch:
+ 
+ package:
+ 
+-	@make clean cleandepend HAVE_MAN=YES
++	@${MAKE} clean cleandepend HAVE_MAN=YES
+ 
+ 	tar -cvf temp.tar --exclude="*~" --exclude="*#" --exclude=".git" \
+ 		--exclude=".svn" --exclude="*.orig" --exclude="*.rej" \
+@@ -328,7 +340,7 @@ help:
+ 	$(CC) -fvisibility=hidden -c $< -o $@
+ 
+ tools/linux_make/linux_make:
+-	make -C tools/linux_make
++	${MAKE} -C tools/linux_make
+ 
+ configure: tools/linux_make/linux_make
+ 	@echo "Configuring webcamd for:"
+diff --git a/kernel/linux_defs.h b/kernel/linux_defs.h
+index f32bf90..f79f068 100644
+--- a/kernel/linux_defs.h
++++ b/kernel/linux_defs.h
+@@ -308,7 +308,6 @@
+ #define	KERN_ERR ""
+ #define	KERN_DEBUG ""
+ #define	KERN_CONT ""
+-#define	KBUILD_MODNAME ""
+ #define	KERN_NOTICE ""
+ #define	BUG(...) __nop
+ #define	WARN(x,...) ({ (x); })
+-- 
+2.15.2 (Apple Git-101.1)
+

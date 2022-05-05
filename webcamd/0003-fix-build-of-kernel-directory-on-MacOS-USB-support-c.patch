@@ -1,0 +1,250 @@
+From dafb9ba49b13105acd455e330b882bd5498c2ee2 Mon Sep 17 00:00:00 2001
+From: Jan Hauffa <jhauffa@gmail.com>
+Date: Sun, 5 Jan 2014 14:48:20 +0100
+Subject: [PATCH 03/16] fix build of kernel directory on MacOS; USB support
+ commented out
+
+---
+ Makefile                     |  5 +++++
+ kernel/linux_file.c          |  9 +++++++++
+ kernel/linux_func.c          |  6 ++++++
+ kernel/linux_start_section.c | 22 ++++++++++++++++++++++
+ kernel/linux_start_section.h |  2 +-
+ kernel/linux_thread.c        |  2 ++
+ kernel/linux_usb.c           |  4 ++++
+ macos_compat.c               | 29 +++++++++++++++++++++++++++++
+ webcamd_global.h             |  6 ++++++
+ 9 files changed, 84 insertions(+), 1 deletion(-)
+ create mode 100644 macos_compat.c
+
+diff --git a/Makefile b/Makefile
+index f13703b..c43b73a 100644
+--- a/Makefile
++++ b/Makefile
+@@ -227,6 +227,8 @@ SRCS+= vtuner_client.c
+ SRCS+= vtuner_server.c
+ .endif
+ 
++OBJS+= macos_compat.o
++
+ .include <bsd.prog.mk>
+ 
+ patch:
+@@ -290,6 +292,9 @@ help:
+ 	@echo "# pwcview"
+ 	@echo "#"
+ 
++macos_compat.o:
++	$(CC) -c $< -o $@
++
+ tools/linux_make/linux_make:
+ 	make -C tools/linux_make
+ 
+diff --git a/kernel/linux_file.c b/kernel/linux_file.c
+index 7d27951..373ccc2 100644
+--- a/kernel/linux_file.c
++++ b/kernel/linux_file.c
+@@ -26,7 +26,9 @@
+ #include <sys/mman.h>
+ #include <sys/syscall.h>
+ 
++#ifndef __APPLE__
+ #include <cuse4bsd.h>
++#endif
+ 
+ struct cdev_handle *
+ linux_open(int f_v4b, int fflags)
+@@ -96,6 +98,7 @@ linux_close(struct cdev_handle *handle)
+ 	return (error);
+ }
+ 
++#ifndef __APPLE__
+ static void
+ linux_fix_f_flags(struct file *fp, int fflags)
+ {
+@@ -107,6 +110,12 @@ linux_fix_f_flags(struct file *fp, int fflags)
+ 			fp->f_flags &= ~O_NONBLOCK;
+ 	}
+ }
++#else
++static void
++linux_fix_f_flags(struct file *fp, int fflags)
++{
++}
++#endif
+ 
+ int
+ linux_ioctl(struct cdev_handle *handle, int fflags,
+diff --git a/kernel/linux_func.c b/kernel/linux_func.c
+index 1037a43..55d4e3d 100644
+--- a/kernel/linux_func.c
++++ b/kernel/linux_func.c
+@@ -37,6 +37,12 @@
+ 
+ #include <dvbdev.h>
+ 
++#ifdef __APPLE__
++#include <libkern/OSByteOrder.h> 
++#define bswap16(x) OSSwapInt16(x)
++#define bswap32(x) OSSwapInt32(x)
++#endif
++
+ int
+ printk_nop()
+ {
+diff --git a/kernel/linux_start_section.c b/kernel/linux_start_section.c
+index 6921e7d..a22c254 100644
+--- a/kernel/linux_start_section.c
++++ b/kernel/linux_start_section.c
+@@ -25,14 +25,24 @@
+ 
+ #include <linux/idr.h>
+ 
++#ifndef __APPLE__
+ extern struct module_init_struct __start_linux_parm_mod;
+ extern struct module_init_struct __start_linux_init_mod;
+ extern struct module_exit_struct __start_linux_exit_mod;
++#else
++#include <mach-o/getsect.h>
++#endif
+ 
+ void
+ linux_parm(void)
+ {
++#ifndef __APPLE__
+ 	struct module_init_struct *t = &__start_linux_parm_mod;
++#else
++	unsigned long secsize;
++	struct module_init_struct *t = (struct module_init_struct *)
++		getsectdata("__DATA", "__linux_parm_mod", &secsize);
++#endif
+ 
+ 	while (t->magic == MODULE_PARM_MAGIC) {
+ 		t->func();
+@@ -43,7 +53,13 @@ linux_parm(void)
+ void
+ linux_init(void)
+ {
++#ifndef __APPLE__
+ 	struct module_init_struct *t = &__start_linux_init_mod;
++#else
++	unsigned long secsize;
++	struct module_init_struct *t = (struct module_init_struct *)
++		getsectdata("__DATA", "__linux_init_mod", &secsize);
++#endif
+ 
+ 	thread_init();
+ 
+@@ -58,7 +74,13 @@ linux_init(void)
+ void
+ linux_exit(void)
+ {
++#ifndef __APPLE__
+ 	struct module_exit_struct *t = &__start_linux_exit_mod;
++#else
++	unsigned long secsize;
++	struct module_init_struct *t = (struct module_init_struct *)
++		getsectdata("__DATA", "__linux_exit_mod", &secsize);
++#endif
+ 
+ 	while (t->magic == MODULE_EXIT_MAGIC) {
+ 		t->func();
+diff --git a/kernel/linux_start_section.h b/kernel/linux_start_section.h
+index 70b3088..dc5507d 100644
+--- a/kernel/linux_start_section.h
++++ b/kernel/linux_start_section.h
+@@ -48,7 +48,7 @@ struct module_exit_struct {
+ #ifndef __APPLE__
+ #define SECTION_NAME(x) __section__(x)
+ #else
+-#define SECTION_NAME(x) __section__("DATA,"x)
++#define SECTION_NAME(x) __section__("__DATA,__"x)
+ #endif
+ 
+ #define	module_parm_init(func) static struct module_init_struct \
+diff --git a/kernel/linux_thread.c b/kernel/linux_thread.c
+index d3e3b4b..28b197c 100644
+--- a/kernel/linux_thread.c
++++ b/kernel/linux_thread.c
+@@ -588,7 +588,9 @@ thread_init(void)
+ 	pthread_mutexattr_destroy(&mattr);
+ 
+ 	pthread_condattr_init(&cattr);
++#ifndef __APPLE__
+ 	pthread_condattr_setclock(&cattr, CLOCK_MONOTONIC);
++#endif
+ 	pthread_cond_init(&mutex_cond, &cattr);
+ 	pthread_cond_init(&sema_cond, &cattr);
+ 	pthread_condattr_destroy(&cattr);
+diff --git a/kernel/linux_usb.c b/kernel/linux_usb.c
+index 835c49a..c8bf2aa 100644
+--- a/kernel/linux_usb.c
++++ b/kernel/linux_usb.c
+@@ -33,6 +33,8 @@ static int min_bufsize;
+ module_param(min_bufsize, int, 0644);
+ MODULE_PARM_DESC(min_bufsize, "Set minimum USB buffer size");
+ 
++#ifndef __APPLE__
++
+ struct usb_linux_softc {
+ 	struct libusb20_config *pcfg;
+ 	struct libusb20_device *pdev;
+@@ -2267,3 +2269,5 @@ usb_translate_errors(int error_code)
+ 		return (-EIO);
+ 	}
+ }
++
++#endif
+diff --git a/macos_compat.c b/macos_compat.c
+new file mode 100644
+index 0000000..a3be60c
+--- /dev/null
++++ b/macos_compat.c
+@@ -0,0 +1,29 @@
++#ifdef __APPLE__
++
++#include <time.h>
++#include <mach/mach.h>
++#include <mach/clock.h>
++
++#define CLOCK_REALTIME 0
++#define CLOCK_MONOTONIC 1
++
++int clock_gettime(int clk_id, struct timespec *tp)
++{
++	clock_serv_t cclock;
++	mach_timespec_t mts;
++	int retval = 0;
++	int mach_clk_id = CALENDAR_CLOCK;
++
++	if (clk_id == CLOCK_MONOTONIC)
++		mach_clk_id = SYSTEM_CLOCK;
++
++	host_get_clock_service(mach_host_self(), mach_clk_id, &cclock);
++	retval = clock_get_time(cclock, &mts);
++	mach_port_deallocate(mach_task_self(), cclock);
++
++	tp->tv_sec = mts.tv_sec;
++	tp->tv_nsec = mts.tv_nsec;
++	return retval;
++}
++
++#endif	/* __APPLE__ */
+diff --git a/webcamd_global.h b/webcamd_global.h
+index 84634bc..9f4c6f6 100644
+--- a/webcamd_global.h
++++ b/webcamd_global.h
+@@ -95,4 +95,10 @@ extern int v4b_get_perm(void);
+ #ifndef O_CLOEXEC
+ #define	O_CLOEXEC	0x00100000
+ #endif
++
++#ifdef __APPLE__
++#define CLOCK_REALTIME_FAST CLOCK_REALTIME
++#define CLOCK_MONOTONIC_FAST CLOCK_MONOTONIC
++int clock_gettime(int clk_id, struct timespec *tp);
++#endif
+ #endif					/* _WEBCAMD_GLOBAL_H_ */
+-- 
+2.15.2 (Apple Git-101.1)
+
